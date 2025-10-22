@@ -6,7 +6,7 @@ actor UserService {
     static let shared = UserService()
     private var db: Firestore { Firestore.firestore() }
 
-    // Create / update profile on sign-up
+    // Create or update profile on sign-up
     func createUserProfile(uid: String, handle: String, displayName: String) async throws {
         try await db.collection("users").document(uid).setData([
             "handle": handle,
@@ -65,5 +65,11 @@ actor UserService {
             list.append(await mapUser(id: d.documentID, data: d.data()))
         }
         return list
+    }
+
+    // Save the current user's FCM token in their Firestore document
+    func saveFCMToken(uid: String, token: String) async throws {
+        try await db.collection("users").document(uid)
+            .setData(["fcmToken": token], merge: true)
     }
 }
