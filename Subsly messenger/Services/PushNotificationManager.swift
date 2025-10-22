@@ -8,6 +8,9 @@ import UIKit
 final class PushNotificationManager: NSObject {
     static let shared = PushNotificationManager()
 
+    // Holds a token received before a user is logged in.
+    private var pendingToken: String?
+
     /// Requests permission from the user and registers for remote notifications.
     func registerForPushNotifications() {
         UNUserNotificationCenter.current().delegate = self
@@ -22,6 +25,20 @@ final class PushNotificationManager: NSObject {
                         print("🔕 Notification permission not granted.")
                     }
                 }
+            }
+        }
+    }
+
+    /// Saves a pending FCM token (if any) once a user ID becomes available.
+    func savePendingToken(for uid: String) {
+        guard let token = pendingToken else { return }
+        Task {
+            do {
+                try await UserService.shared.saveFCMToken(uid: uid, token: token)
+                print("🔐 Saved pending FCM token for user \(uid)")
+                pendingToken = nil
+            } catch {
+                print("❌ Failed to save pending FCM token: \(error.localizedDescription)")
             }
         }
     }
@@ -41,18 +58,21 @@ extension PushNotificationManager: UNUserNotificationCenterDelegate {
 extension PushNotificationManager: MessagingDelegate {
     // Called when a new or refreshed FCM token is received.
     func messaging(_ messaging: Messaging, didReceiveRegistrationToken fcmToken: String?) {
-        guard let uid = SessionStore.shared.id,
-              let token = fcmToken else {
-            return
-        }
-        // Persist the token to Firestore so that Cloud Functions can send push notifications.
-        Task {
-            do {
-                try await UserService.shared.saveFCMToken(uid: uid, token: token)
-                print("🔐 Saved FCM token for user \(uid)")
-            } catch {
-                print("❌ Failed to save FCM token: \(error.localizedDescription)")
+        guard let token = fcmToken else { return }
+
+        if let uid = SessionStore.shared.id {
+            // User is signed in; save immediately.
+            Task {
+                do {
+                    try await UserService.shared.saveFCMToken(uid: uid, token: token)
+                    print("🔐 Saved FCM token for user \(uid)")
+                } catch {
+                    print("❌ Failed to save FCM token: \(error.localizedDescription)")
+                }
             }
+        } else {
+            // User not signed in yet; store token until login.
+            pendingToken = token
         }
     }
 }
