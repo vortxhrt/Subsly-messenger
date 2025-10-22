@@ -46,9 +46,12 @@ private struct ThreadRow: View {
                     Text(usersStore.name(for: otherId) ?? "User \(otherId.prefix(6))…")
                         .fontWeight(.semibold)
 
-                    Text(previewText(thread.lastMessagePreview))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    // Live preview: typing or last message text
+                    ThreadPreviewText(
+                        thread: thread,
+                        otherUserId: otherId,
+                        currentUserId: currentUser.id ?? ""
+                    )
                 }
 
                 Spacer()
@@ -60,11 +63,6 @@ private struct ThreadRow: View {
                 }
             }
         }
-    }
-
-    private func previewText(_ text: String?) -> String {
-        let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? "No messages yet" : trimmed
     }
 
     private static func relative(_ date: Date) -> String {
