@@ -7,7 +7,7 @@ struct SubslyApp: App {
 
     @StateObject private var session = SessionStore.shared
     @StateObject private var threadsStore = ThreadsStore.shared
-    @StateObject private var usersStore = UsersStore()   // new
+    @StateObject private var usersStore = UsersStore()
 
     var body: some Scene {
         WindowGroup {
