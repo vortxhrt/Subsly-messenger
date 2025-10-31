@@ -2,16 +2,16 @@ import Foundation
 import FirebaseFirestore
 
 /// Firestore helpers for delivery/read receipts on 1:1 threads.
-/// Message schema fields expected per document:
-///   deliveredTo: [String]   // user IDs that have received the message
-///   readBy:      [String]   // user IDs that have read the message
+/// Message doc schema adds (arrays of UIDs):
+///   deliveredTo: [String]
+///   readBy:      [String]
 final class ReceiptsService {
     static let shared = ReceiptsService()
     private init() {}
 
     private let db = Firestore.firestore()
 
-    /// Mark the message as delivered *to* `uid` (idempotent).
+    /// Mark delivered (idempotent). Safe if field doesn't exist yet.
     func markDelivered(threadId: String, messageId: String, to uid: String) async {
         let ref = db.collection("threads").document(threadId)
             .collection("messages").document(messageId)
@@ -28,14 +28,14 @@ final class ReceiptsService {
         }
     }
 
-    /// Mark the message as read *by* `uid` (idempotent).
+    /// Mark read (idempotent). Also implies delivered.
     func markRead(threadId: String, messageId: String, by uid: String) async {
         let ref = db.collection("threads").document(threadId)
             .collection("messages").document(messageId)
         do {
             try await ref.updateData([
                 "readBy": FieldValue.arrayUnion([uid]),
-                "deliveredTo": FieldValue.arrayUnion([uid]) // read implies delivered
+                "deliveredTo": FieldValue.arrayUnion([uid])
             ])
         } catch {
             do {
@@ -49,8 +49,7 @@ final class ReceiptsService {
         }
     }
 
-    /// Listen for receipt changes on a single message.
-    /// Returns (deliveredTo, readBy) as sets of UIDs.
+    /// Listen to receipt changes for one message.
     @discardableResult
     func listenReceipts(
         threadId: String,

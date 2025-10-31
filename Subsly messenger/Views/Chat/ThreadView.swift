@@ -66,6 +66,8 @@ struct ThreadView: View {
                 }
                 .scrollIndicators(.hidden)
                 .background(Color(.systemGroupedBackground))
+
+                // Keep bottom pinned and wire receipts whenever messages change.
                 .onChange(of: messages) { _, _ in
                     withAnimation(.easeOut(duration: 0.25)) {
                         proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom)
@@ -86,7 +88,7 @@ struct ThreadView: View {
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
 
-            // Bottom bar: background handled OUTSIDE the composer so nothing shifts.
+            // Bottom bar (composer)
             .safeAreaInset(edge: .bottom, spacing: 0) {
                 VStack(spacing: 0) {
                     Divider().opacity(0.08)
@@ -110,8 +112,12 @@ struct ThreadView: View {
 
             .task { await openThreadIfNeeded(proxy: proxy) }
             .onAppear {
+                // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
                 markIncomingAsRead()
+                #if DEBUG
+                print("ThreadView appear -> myId=\(myId) otherUID=\(otherUID) threadId=\(threadId ?? "nil")")
+                #endif
             }
             .onDisappear {
                 listener?.remove(); listener = nil
@@ -172,14 +178,24 @@ struct ThreadView: View {
     /// Mark *incoming* messages as delivered and read (idempotent).
     private func markIncomingAsDelivered() {
         guard let tid = threadId else { return }
-        for msg in messages where msg.senderId != myId {
+        let incoming = messages.filter { $0.senderId != myId }
+        guard !incoming.isEmpty else { return }
+        for msg in incoming {
+            #if DEBUG
+            print("MARK DELIVERED tid=\(tid) msg=\(msg.id) to=\(myId)")
+            #endif
             Task { await ReceiptsService.shared.markDelivered(threadId: tid, messageId: msg.id, to: myId) }
         }
     }
 
     private func markIncomingAsRead() {
         guard let tid = threadId else { return }
-        for msg in messages where msg.senderId != myId {
+        let incoming = messages.filter { $0.senderId != myId }
+        guard !incoming.isEmpty else { return }
+        for msg in incoming {
+            #if DEBUG
+            print("MARK READ tid=\(tid) msg=\(msg.id) by=\(myId)")
+            #endif
             Task { await ReceiptsService.shared.markRead(threadId: tid, messageId: msg.id, by: myId) }
         }
     }
@@ -236,7 +252,7 @@ struct ThreadView: View {
             await MainActor.run {
                 pendingOutgoingIDs.remove(localId)
             }
-            // Also clear the local bubble after server snapshot replaces it (handled by listener).
+            // The server snapshot will replace the local bubble.
         }
 
         // Stop typing state
@@ -266,6 +282,9 @@ struct ThreadView: View {
                 self.threadId = tid
                 startListening(threadId: tid, proxy: proxy)
                 startTypingListener(threadId: tid)
+                #if DEBUG
+                print("Opened threadId=\(tid) as myId=\(myId) with otherUID=\(otherUID)")
+                #endif
             }
         }
     }
@@ -278,8 +297,14 @@ struct ThreadView: View {
                 withAnimation(.easeOut(duration: 0.2)) {
                     proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom)
                 }
+                // On every refresh, wire receipts + clean pending.
                 self.setupReceiptsIfNeeded()
+                self.markIncomingAsDelivered()
+                self.markIncomingAsRead()
                 self.purgeStalePendingIDs()
+                #if DEBUG
+                print("Messages updated (\(list.count)) for thread=\(threadId)")
+                #endif
             }
         }
     }
