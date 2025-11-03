@@ -31,11 +31,17 @@ struct PeopleSearchView: View {
                         NavigationLink {
                             ThreadView(currentUser: currentUser, otherUID: user.id ?? "")
                         } label: {
-                            HStack {
-                                Circle().frame(width: 36, height: 36).opacity(0.15)
+                            HStack(spacing: 12) {
+                                AvatarView(
+                                    avatarURL: user.avatarURL,
+                                    name: displayName(for: user),
+                                    size: 40
+                                )
+
                                 VStack(alignment: .leading) {
                                     Text("@\(user.handle)").bold()
-                                    Text(user.displayName).foregroundStyle(.secondary)
+                                    Text(displayName(for: user))
+                                        .foregroundStyle(.secondary)
                                 }
                             }
                         }
@@ -50,6 +56,11 @@ struct PeopleSearchView: View {
             .navigationTitle("Find People")
         }
         .onSubmit { Task { await search() } }
+    }
+
+    private func displayName(for user: AppUser) -> String {
+        let trimmed = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? user.handle : trimmed
     }
 
     private func search() async {
