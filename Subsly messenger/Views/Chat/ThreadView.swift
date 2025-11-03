@@ -29,6 +29,14 @@ struct ThreadView: View {
     @State private var pendingOutgoingIDs: Set<String> = []
 
     @State private var isOpening = false
+    @State private var messageLimit: Int = 20
+    private let pageSize: Int = 20
+    @State private var hasMoreHistory: Bool = false
+    @State private var isLoadingMore: Bool = false
+    @State private var restoreScrollToId: String?
+    @State private var hasPerformedInitialScroll = false
+
+    private let bottomContentPadding: CGFloat = 80
 
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
@@ -45,6 +53,22 @@ struct ThreadView: View {
             VStack(spacing: 0) {
                 ScrollView {
                     LazyVStack(spacing: 6) {
+                        if hasMoreHistory {
+                            Color.clear
+                                .frame(height: 1)
+                                .onAppear {
+                                    if hasPerformedInitialScroll && !isLoadingMore {
+                                        loadMoreHistory()
+                                    }
+                                }
+                        }
+
+                        if hasMoreHistory && isLoadingMore {
+                            ProgressView()
+                                .scaleEffect(0.85)
+                                .padding(.bottom, 6)
+                        }
+
                         ForEach(messages, id: \.id) { msg in
                             MessageBubbleView(
                                 text: msg.text,
@@ -63,14 +87,33 @@ struct ThreadView: View {
                         Color.clear.frame(height: 1).id("BOTTOM_ANCHOR")
                     }
                     .padding(.top, 8)
+                    .padding(.bottom, bottomContentPadding)
                 }
                 .scrollIndicators(.hidden)
                 .background(Color(.systemGroupedBackground))
 
                 // Keep bottom pinned and wire receipts whenever messages change.
                 .onChange(of: messages) { _, _ in
-                    withAnimation(.easeOut(duration: 0.25)) {
-                        proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom)
+                    hasMoreHistory = messages.count >= messageLimit
+                    if isLoadingMore {
+                        if let restoreId = restoreScrollToId {
+                            DispatchQueue.main.async {
+                                proxy.scrollTo(restoreId, anchor: .top)
+                            }
+                        }
+                        restoreScrollToId = nil
+                        isLoadingMore = false
+                    } else {
+                        if messages.isEmpty {
+                            // Nothing to scroll yet
+                        } else if hasPerformedInitialScroll {
+                            scrollToBottom(proxy: proxy, animated: true)
+                        } else {
+                            DispatchQueue.main.async {
+                                scrollToBottom(proxy: proxy, animated: false)
+                                hasPerformedInitialScroll = true
+                            }
+                        }
                     }
                     // Wire up receipts + mark my receipts for incoming
                     setupReceiptsIfNeeded()
@@ -80,13 +123,13 @@ struct ThreadView: View {
                     purgeStalePendingIDs()
                 }
                 .onChange(of: isOtherTyping) { _, _ in
-                    withAnimation(.easeOut(duration: 0.2)) {
-                        proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom)
-                    }
+                    guard !isLoadingMore else { return }
+                    scrollToBottom(proxy: proxy, animated: true)
                 }
             }
             .navigationTitle("Chat")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar(.hidden, for: .tabBar)
 
             // Bottom bar (composer)
             .safeAreaInset(edge: .bottom, spacing: 0) {
@@ -110,7 +153,7 @@ struct ThreadView: View {
                 .background(.ultraThinMaterial)
             }
 
-            .task { await openThreadIfNeeded(proxy: proxy) }
+            .task { await openThreadIfNeeded() }
             .onAppear {
                 // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
@@ -269,7 +312,7 @@ struct ThreadView: View {
 
     // MARK: - Thread bootstrap + listeners
 
-    private func openThreadIfNeeded(proxy: ScrollViewProxy) async {
+    private func openThreadIfNeeded() async {
         guard !isOpening else { return }
         isOpening = true
         defer { isOpening = false }
@@ -280,7 +323,12 @@ struct ThreadView: View {
            let tid = t.id, !tid.isEmpty {
             await MainActor.run {
                 self.threadId = tid
-                startListening(threadId: tid, proxy: proxy)
+                messageLimit = pageSize
+                hasMoreHistory = false
+                isLoadingMore = false
+                restoreScrollToId = nil
+                hasPerformedInitialScroll = false
+                startListening(threadId: tid, limit: messageLimit)
                 startTypingListener(threadId: tid)
                 #if DEBUG
                 print("Opened threadId=\(tid) as myId=\(myId) with otherUID=\(otherUID)")
@@ -289,24 +337,24 @@ struct ThreadView: View {
         }
     }
 
-    private func startListening(threadId: String, proxy: ScrollViewProxy) {
+    private func startListening(threadId: String, limit: Int) {
         listener?.remove()
-        listener = ChatService.shared.listenMessages(threadId: threadId) { list in
+        listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
                 self.messages = list
-                withAnimation(.easeOut(duration: 0.2)) {
-                    proxy.scrollTo("BOTTOM_ANCHOR", anchor: .bottom)
-                }
-                // On every refresh, wire receipts + clean pending.
-                self.setupReceiptsIfNeeded()
-                self.markIncomingAsDelivered()
-                self.markIncomingAsRead()
-                self.purgeStalePendingIDs()
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
             }
         }
+    }
+
+    private func loadMoreHistory() {
+        guard hasMoreHistory, !isLoadingMore, let tid = threadId else { return }
+        restoreScrollToId = messages.first?.id
+        isLoadingMore = true
+        messageLimit += pageSize
+        startListening(threadId: tid, limit: messageLimit)
     }
 
     private func startTypingListener(threadId: String) {
@@ -318,6 +366,17 @@ struct ThreadView: View {
             Task { @MainActor in
                 self.isOtherTyping = isTyping
             }
+        }
+    }
+
+    private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
+        let targetId = messages.last?.id ?? "BOTTOM_ANCHOR"
+        if animated {
+            withAnimation(.easeOut(duration: 0.25)) {
+                proxy.scrollTo(targetId, anchor: .bottom)
+            }
+        } else {
+            proxy.scrollTo(targetId, anchor: .bottom)
         }
     }
 }

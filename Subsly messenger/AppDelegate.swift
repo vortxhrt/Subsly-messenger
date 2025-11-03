@@ -69,9 +69,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
             }
         }
 
-        // Send a local notification after 3s to confirm banners actually display
-        scheduleLocalDebugNotification()
-
         // Save token when auth changes
         Auth.auth().addStateDidChangeListener { _, user in
             if let user = user { print("👤 Auth state: signed in uid=\(user.uid)") } else { print("👤 Auth state: signed out") }
@@ -185,20 +182,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         ) { err in
             if let err = err { print("❌ Saving FCM token failed:", err.localizedDescription) }
             else { print("✅ FCM token saved to Firestore.") }
-        }
-    }
-
-    // MARK: - Local debug notification
-    private func scheduleLocalDebugNotification() {
-        let content = UNMutableNotificationContent()
-        content.title = "Subsly Local Debug"
-        content.body  = "If you see this, iOS banners work."
-        content.sound = .default
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 3, repeats: false)
-        let req = UNNotificationRequest(identifier: "subsly.local.debug", content: content, trigger: trigger)
-        UNUserNotificationCenter.current().add(req) { err in
-            if let err = err { print("❌ Local notif scheduling failed:", err.localizedDescription) }
-            else { print("🧪 Local notif scheduled for +3s") }
         }
     }
 
