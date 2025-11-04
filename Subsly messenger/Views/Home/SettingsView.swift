@@ -5,6 +5,7 @@ import UIKit
 struct SettingsView: View {
     @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var usersStore: UsersStore
+    @Environment(\.dismiss) private var dismiss
 
     let currentUser: AppUser
 
@@ -15,6 +16,7 @@ struct SettingsView: View {
     @State private var statusMessage: String?
     @State private var statusIsError = false
     @State private var bioText: String
+    @FocusState private var isBioFocused: Bool
 
     init(currentUser: AppUser) {
         self.currentUser = currentUser
@@ -31,6 +33,19 @@ struct SettingsView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
+            .navigationBarBackButtonHidden(true)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button {
+                        dismiss()
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "chevron.left")
+                            Text("Back")
+                        }
+                    }
+                }
+            }
         }
         .onChange(of: session.currentUser) { _, newValue in
             if let updated = newValue {
@@ -112,6 +127,7 @@ struct SettingsView: View {
                         )
                         .padding(.horizontal, -4)
                         .padding(.vertical, -4)
+                        .focused($isBioFocused)
                 }
 
                 HStack {
@@ -121,7 +137,10 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                 }
 
-                Button(action: { Task { await saveProfile() } }) {
+                Button(action: {
+                    isBioFocused = false
+                    Task { await saveProfile() }
+                }) {
                     if isSavingProfile {
                         ProgressView()
                             .tint(.white)
@@ -237,6 +256,7 @@ struct SettingsView: View {
             isSavingProfile = true
             statusMessage = nil
             statusIsError = false
+            isBioFocused = false
         }
 
         do {

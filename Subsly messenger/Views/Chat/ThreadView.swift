@@ -4,6 +4,7 @@ import FirebaseFirestore
 struct ThreadView: View {
     @EnvironmentObject private var threadsStore: ThreadsStore
     @EnvironmentObject private var usersStore: UsersStore
+    @Environment(\.dismiss) private var dismiss
     let currentUser: AppUser
     let otherUID: String
 
@@ -96,7 +97,7 @@ struct ThreadView: View {
                 .background(Color(.systemGroupedBackground))
 
                 // Keep bottom pinned and wire receipts whenever messages change.
-                .onChange(of: messages) { _, _ in
+                .onChange(of: messages) { _ in
                     hasMoreHistory = messages.count >= messageLimit
                     if isLoadingMore {
                         if let restoreId = restoreScrollToId {
@@ -125,22 +126,33 @@ struct ThreadView: View {
                     // Clear pending IDs that no longer exist (server confirmed / replaced)
                     purgeStalePendingIDs()
                 }
-                .onChange(of: isOtherTyping) { _, _ in
+                .onChange(of: isOtherTyping) { _ in
                     guard !isLoadingMore else { return }
                     scrollToBottom(proxy: proxy, animated: true)
                 }
             }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .navigationBarBackButtonHidden(true)
             .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button(action: { dismiss() }) {
+                        Image(systemName: "chevron.left")
+                            .imageScale(.medium)
+                            .font(.headline)
+                    }
+                    .accessibilityLabel("Back")
+                }
                 ToolbarItem(placement: .principal) {
                     profileHeader
                 }
             }
+            // FIX: use SwiftUI's Visibility + inferred placement
             .toolbar(.hidden, for: .tabBar)
 
             // Bottom bar (composer)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
+            // FIX: use the matching overload without spacing param confusion
+            .safeAreaInset(edge: .bottom) {
                 VStack(spacing: 0) {
                     Divider().opacity(0.08)
                     ComposerView(
