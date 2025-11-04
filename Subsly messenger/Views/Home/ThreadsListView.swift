@@ -4,28 +4,74 @@ struct ThreadsListView: View {
     @EnvironmentObject var threadsStore: ThreadsStore
     @EnvironmentObject var usersStore: UsersStore
     let currentUser: AppUser
+    @State private var editMode: EditMode = .inactive
 
     var body: some View {
         NavigationStack {
             List {
-                if threadsStore.threads.isEmpty {
+                if threadsStore.pinnedThreads.isEmpty && threadsStore.unpinnedThreads.isEmpty {
                     Section {
                         Text("No conversations yet. Find someone in **Search** to start chatting.")
                             .foregroundStyle(.secondary)
                     }
                 } else {
-                    ForEach(threadsStore.threads) { thread in
-                        if let otherId = thread.members.first(where: { $0 != (currentUser.id ?? "") }) {
-                            ThreadRow(otherId: otherId,
-                                      currentUser: currentUser,
-                                      thread: thread)
-                                .task { await usersStore.ensure(uid: otherId) }
+                    if !threadsStore.pinnedThreads.isEmpty {
+                        Section("Pinned") {
+                            ForEach(threadsStore.pinnedThreads) { thread in
+                                if let otherId = otherParticipant(in: thread) {
+                                    ThreadRow(
+                                        otherId: otherId,
+                                        currentUser: currentUser,
+                                        thread: thread,
+                                        isPinned: true,
+                                        canPin: true,
+                                        onTogglePin: { threadsStore.togglePin(thread) },
+                                        onDelete: { threadsStore.softDelete(thread) }
+                                    )
+                                    .task { await usersStore.ensure(uid: otherId) }
+                                }
+                            }
+                            .onMove { indices, newOffset in
+                                threadsStore.movePinned(from: indices, to: newOffset)
+                            }
+                        }
+                    }
+
+                    if !threadsStore.unpinnedThreads.isEmpty {
+                        Section("Chats") {
+                            ForEach(threadsStore.unpinnedThreads) { thread in
+                                if let otherId = otherParticipant(in: thread) {
+                                    ThreadRow(
+                                        otherId: otherId,
+                                        currentUser: currentUser,
+                                        thread: thread,
+                                        isPinned: false,
+                                        canPin: threadsStore.canPin(thread),
+                                        onTogglePin: { threadsStore.togglePin(thread) },
+                                        onDelete: { threadsStore.softDelete(thread) }
+                                    )
+                                    .task { await usersStore.ensure(uid: otherId) }
+                                }
+                            }
                         }
                     }
                 }
             }
+            .environment(\.editMode, $editMode)
             .navigationTitle("Your Chats")
+            .toolbar {
+                if threadsStore.pinnedThreads.count > 1 {
+                    ToolbarItem(placement: .navigationBarTrailing) {
+                        EditButton()
+                    }
+                }
+            }
         }
+    }
+
+    private func otherParticipant(in thread: ThreadModel) -> String? {
+        let currentId = currentUser.id ?? ""
+        return thread.members.first { $0 != currentId }
     }
 }
 
@@ -34,6 +80,12 @@ private struct ThreadRow: View {
     let otherId: String
     let currentUser: AppUser
     let thread: ThreadModel
+    let isPinned: Bool
+    let canPin: Bool
+    let onTogglePin: () -> Void
+    let onDelete: () -> Void
+
+    @State private var showingDeleteConfirmation = false
 
     private var otherUser: AppUser? { usersStore.user(for: otherId) }
 
@@ -81,7 +133,39 @@ private struct ThreadRow: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+
+                if isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(45))
+                        .accessibilityLabel("Pinned chat")
+                }
             }
+        }
+        .contextMenu {
+            Button(action: onTogglePin) {
+                Label(isPinned ? "Unpin Chat" : "Pin Chat", systemImage: isPinned ? "pin.slash" : "pin")
+            }
+            .disabled(!isPinned && !canPin)
+
+            Button(role: .destructive) {
+                showingDeleteConfirmation = true
+            } label: {
+                Label("Delete Chat", systemImage: "trash")
+            }
+        }
+        .confirmationDialog(
+            "Delete this chat?",
+            isPresented: $showingDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            Button("Delete", role: .destructive) {
+                onDelete()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("You can start a new conversation later, but this will hide the current chat history for you.")
         }
     }
 

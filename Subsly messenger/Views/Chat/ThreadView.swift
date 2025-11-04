@@ -2,6 +2,7 @@ import SwiftUI
 import FirebaseFirestore
 
 struct ThreadView: View {
+    @EnvironmentObject private var threadsStore: ThreadsStore
     let currentUser: AppUser
     let otherUID: String
 
@@ -221,25 +222,45 @@ struct ThreadView: View {
     /// Mark *incoming* messages as delivered and read (idempotent).
     private func markIncomingAsDelivered() {
         guard let tid = threadId else { return }
-        let incoming = messages.filter { $0.senderId != myId }
-        guard !incoming.isEmpty else { return }
-        for msg in incoming {
-            #if DEBUG
-            print("MARK DELIVERED tid=\(tid) msg=\(msg.id) to=\(myId)")
-            #endif
-            Task { await ReceiptsService.shared.markDelivered(threadId: tid, messageId: msg.id, to: myId) }
+        let otherId = otherUID
+        let myIdCopy = myId
+        let messageIds = messages
+            .filter { $0.senderId == otherId }
+            .map { $0.id }
+        guard !messageIds.isEmpty else { return }
+
+        let threadIdCopy = tid
+        Task.detached(priority: .utility) {
+            for messageId in messageIds {
+                #if DEBUG
+                print("MARK DELIVERED tid=\(threadIdCopy) msg=\(messageId) to=\(myIdCopy)")
+                #endif
+                await ReceiptsService.shared.markDelivered(threadId: threadIdCopy,
+                                                            messageId: messageId,
+                                                            to: myIdCopy)
+            }
         }
     }
 
     private func markIncomingAsRead() {
         guard let tid = threadId else { return }
-        let incoming = messages.filter { $0.senderId != myId }
-        guard !incoming.isEmpty else { return }
-        for msg in incoming {
-            #if DEBUG
-            print("MARK READ tid=\(tid) msg=\(msg.id) by=\(myId)")
-            #endif
-            Task { await ReceiptsService.shared.markRead(threadId: tid, messageId: msg.id, by: myId) }
+        let otherId = otherUID
+        let myIdCopy = myId
+        let messageIds = messages
+            .filter { $0.senderId == otherId }
+            .map { $0.id }
+        guard !messageIds.isEmpty else { return }
+
+        let threadIdCopy = tid
+        Task.detached(priority: .utility) {
+            for messageId in messageIds {
+                #if DEBUG
+                print("MARK READ tid=\(threadIdCopy) msg=\(messageId) by=\(myIdCopy)")
+                #endif
+                await ReceiptsService.shared.markRead(threadId: threadIdCopy,
+                                                       messageId: messageId,
+                                                       by: myIdCopy)
+            }
         }
     }
 
@@ -341,11 +362,19 @@ struct ThreadView: View {
         listener?.remove()
         listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
-                self.messages = list
+                self.messages = filteredMessages(list, threadId: threadId)
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
             }
+        }
+    }
+
+    private func filteredMessages(_ list: [MessageModel], threadId: String) -> [MessageModel] {
+        guard let cutoff = threadsStore.deletionCutoff(for: threadId) else { return list }
+        return list.filter { message in
+            guard let created = message.createdAt else { return false }
+            return created > cutoff
         }
     }
 
