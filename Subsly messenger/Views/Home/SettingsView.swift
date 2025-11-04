@@ -8,6 +8,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
 
     let currentUser: AppUser
+    let onClose: (() -> Void)?
 
     @State private var workingUser: AppUser
     @State private var pickerItem: PhotosPickerItem?
@@ -18,8 +19,9 @@ struct SettingsView: View {
     @State private var bioText: String
     @FocusState private var isBioFocused: Bool
 
-    init(currentUser: AppUser) {
+    init(currentUser: AppUser, onClose: (() -> Void)? = nil) {
         self.currentUser = currentUser
+        self.onClose = onClose
         _workingUser = State(initialValue: currentUser)
         _bioText = State(initialValue: currentUser.bio ?? "")
     }
@@ -37,27 +39,30 @@ struct SettingsView: View {
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
+                        if let onClose {
+                            withAnimation {
+                                onClose()
+                            }
+                        }
                         dismiss()
                     } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: "chevron.left")
-                            Text("Back")
-                        }
+                        Image(systemName: "chevron.left")
                     }
+                    .accessibilityLabel("Back to chats")
                 }
             }
         }
-        .onChange(of: session.currentUser) { _, newValue in
+        .onChange(of: session.currentUser) { newValue in
             if let updated = newValue {
                 workingUser = updated
                 bioText = updated.bio ?? ""
             }
         }
-        .onChange(of: pickerItem) { _, newItem in
+        .onChange(of: pickerItem) { newItem in
             guard let newItem else { return }
             Task { await processSelection(newItem) }
         }
-        .onChange(of: bioText) { _, newValue in
+        .onChange(of: bioText) { newValue in
             enforceBioLimit(for: newValue)
         }
     }
