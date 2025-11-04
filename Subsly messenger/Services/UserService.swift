@@ -16,7 +16,10 @@ actor UserService {
             "handle": handle,
             "handleLower": handle.lowercased(),
             "displayName": displayName,
-            "createdAt": FieldValue.serverTimestamp()
+            "createdAt": FieldValue.serverTimestamp(),
+            "isOnline": false,
+            "isStatusHidden": false,
+            "lastActiveAt": FieldValue.serverTimestamp()
         ]
         if let avatarURL, !avatarURL.isEmpty {
             payload["avatarURL"] = avatarURL
@@ -39,6 +42,43 @@ actor UserService {
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
 
+    func updatePresence(uid: String, isOnline: Bool, recordLastActive: Bool) async throws {
+        var payload: [String: Any] = [
+            "isOnline": isOnline,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+        if recordLastActive {
+            payload["lastActiveAt"] = FieldValue.serverTimestamp()
+        }
+        try await db.collection("users").document(uid).setData(payload, merge: true)
+    }
+
+    func updateStatusVisibility(uid: String, isHidden: Bool) async throws {
+        try await db.collection("users").document(uid).setData([
+            "isStatusHidden": isHidden,
+            "updatedAt": FieldValue.serverTimestamp()
+        ], merge: true)
+    }
+
+    nonisolated func listenUser(uid: String, onChange: @escaping @Sendable (AppUser?) -> Void) -> ListenerRegistration {
+        let reference = Firestore.firestore().collection("users").document(uid)
+        return reference.addSnapshotListener { snapshot, error in
+            if let error = error {
+                print("listenUser error:", error.localizedDescription)
+            }
+            guard let snapshot, let data = snapshot.data() else {
+                Task { @MainActor in onChange(nil) }
+                return
+            }
+            Task {
+                let user = await UserService.shared.mapUser(id: snapshot.documentID, data: data)
+                await MainActor.run {
+                    onChange(user)
+                }
+            }
+        }
+    }
+
     // Build AppUser on main actor (avoids MainActor initializer warnings)
     private func mapUser(id: String, data: [String: Any]) async -> AppUser {
         let handle = (data["handle"] as? String) ?? "user\(id.prefix(6))"
@@ -46,13 +86,19 @@ actor UserService {
         let avatarURL = data["avatarURL"] as? String
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue()
         let bio = data["bio"] as? String
+        let isOnline = data["isOnline"] as? Bool ?? false
+        let lastActive = (data["lastActiveAt"] as? Timestamp)?.dateValue()
+        let isStatusHidden = data["isStatusHidden"] as? Bool ?? false
         return await MainActor.run {
             AppUser(id: id,
                     handle: handle,
                     displayName: displayName,
                     avatarURL: avatarURL,
                     bio: bio,
-                    createdAt: createdAt)
+                    createdAt: createdAt,
+                    isOnline: isOnline,
+                    lastActiveAt: lastActive,
+                    isStatusHidden: isStatusHidden)
         }
     }
 

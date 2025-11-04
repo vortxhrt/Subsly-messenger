@@ -10,7 +10,9 @@ struct UserProfileView: View {
                 if let profile = profile {
                     AvatarView(avatarURL: profile.avatarURL,
                                name: profileDisplayName,
-                               size: 120)
+                               size: 120,
+                               showPresenceIndicator: true,
+                               isOnline: profile.isVisiblyOnline)
                         .padding(.top, 24)
 
                     VStack(spacing: 4) {
@@ -18,6 +20,9 @@ struct UserProfileView: View {
                             .font(.title2)
                             .fontWeight(.semibold)
                         Text("@\(profile.handle)")
+                            .foregroundStyle(.secondary)
+                        Text(statusLine(for: profile))
+                            .font(.subheadline)
                             .foregroundStyle(.secondary)
                     }
 
@@ -67,6 +72,24 @@ struct UserProfileView: View {
             return trimmed.isEmpty ? profile.handle : trimmed
         }
         return "User \(userId.prefix(6))"
+    }
+
+    private func statusLine(for user: AppUser) -> String {
+        if user.isStatusHidden { return "Offline" }
+        if user.isVisiblyOnline { return "Online" }
+        if let lastSeen = formattedLastSeen(for: user) {
+            return "Last seen \(lastSeen)"
+        }
+        return "Offline"
+    }
+
+    private func formattedLastSeen(for user: AppUser) -> String? {
+        guard let description = user.lastSeenDescription() else { return nil }
+        let normalized = description.lowercased()
+        if normalized.contains("0 seconds") {
+            return "just now"
+        }
+        return description
     }
 }
 

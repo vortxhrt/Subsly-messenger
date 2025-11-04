@@ -2,13 +2,14 @@ import SwiftUI
 import FirebaseFirestore
 
 struct ThreadView: View {
+    @EnvironmentObject private var session: SessionStore
     @EnvironmentObject private var threadsStore: ThreadsStore
     @EnvironmentObject private var usersStore: UsersStore
     @Environment(\.dismiss) private var dismiss
     let currentUser: AppUser
     let otherUID: String
 
-    private let myId: String
+    @State private var myId: String
 
     @State private var threadId: String?
     @State private var messages: [MessageModel] = []
@@ -45,7 +46,7 @@ struct ThreadView: View {
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
         self.otherUID = otherUID
-        self.myId = currentUser.id ?? ""
+        _myId = State(initialValue: currentUser.id ?? "")
     }
 
     private var canSend: Bool {
@@ -195,6 +196,11 @@ struct ThreadView: View {
                 UserProfileView(userId: otherUID)
             }
         }
+        .onAppear(perform: syncMyIdFromSession)
+        .onChange(of: session.currentUser?.id) { _ in syncMyIdFromSession() }
+        .onChange(of: myId) { _ in
+            Task { await openThreadIfNeeded() }
+        }
     }
 
     // MARK: - Status computation
@@ -244,7 +250,7 @@ struct ThreadView: View {
 
     /// Mark *incoming* messages as delivered and read (idempotent).
     private func markIncomingAsDelivered() {
-        guard let tid = threadId else { return }
+        guard let tid = threadId, !myId.isEmpty else { return }
         let otherId = otherUID
         let myIdCopy = myId
         let messageIds = messages
@@ -266,7 +272,7 @@ struct ThreadView: View {
     }
 
     private func markIncomingAsRead() {
-        guard let tid = threadId else { return }
+        guard let tid = threadId, !myId.isEmpty else { return }
         let otherId = otherUID
         let myIdCopy = myId
         let messageIds = messages
@@ -316,7 +322,7 @@ struct ThreadView: View {
     // MARK: - Sending
 
     private func send() {
-        guard let tid = threadId else { return }
+        guard let tid = threadId, !myId.isEmpty else { return }
 
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -358,10 +364,10 @@ struct ThreadView: View {
 
     private func openThreadIfNeeded() async {
         guard !isOpening else { return }
+        guard threadId == nil else { return }
+        guard !myId.isEmpty else { return }
         isOpening = true
         defer { isOpening = false }
-
-        guard !myId.isEmpty else { return }
 
         if let t = try? await ChatService.shared.ensureThread(currentUID: myId, otherUID: otherUID),
            let tid = t.id, !tid.isEmpty {
@@ -457,10 +463,33 @@ struct ThreadView: View {
         return "User \(otherUID.prefix(6))"
     }
 
+    private var otherStatusText: String? {
+        guard let user = otherUser else { return nil }
+        if user.isStatusHidden { return "Offline" }
+        if user.isVisiblyOnline { return "Online" }
+        if let lastSeen = formattedLastSeen(for: user) {
+            return "Last seen \(lastSeen)"
+        }
+        return "Offline"
+    }
+
+    private func formattedLastSeen(for user: AppUser) -> String? {
+        guard let description = user.lastSeenDescription() else { return nil }
+        let normalized = description.lowercased()
+        if normalized.contains("0 seconds") {
+            return "just now"
+        }
+        return description
+    }
+
     private var profileHeader: some View {
         Button(action: { showingProfile = true }) {
             HStack(spacing: 12) {
-                AvatarView(avatarURL: otherAvatarURL, name: otherAvatarLabel, size: 32)
+                AvatarView(avatarURL: otherAvatarURL,
+                           name: otherAvatarLabel,
+                           size: 32,
+                           showPresenceIndicator: true,
+                           isOnline: otherUser?.isVisiblyOnline ?? false)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(otherDisplayName.isEmpty ? "Chat" : otherDisplayName)
                         .font(.headline)
@@ -470,6 +499,12 @@ struct ThreadView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
+                    if let status = otherStatusText {
+                        Text(status)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
             }
         }
@@ -477,5 +512,16 @@ struct ThreadView: View {
         .accessibilityElement()
         .accessibilityLabel("View profile for \(otherDisplayName.isEmpty ? "this conversation" : otherDisplayName)")
         .accessibilityHint("Opens profile details")
+    }
+}
+
+// MARK: - Helpers
+
+private extension ThreadView {
+    func syncMyIdFromSession() {
+        guard let sessionId = session.currentUser?.id, !sessionId.isEmpty else { return }
+        if myId != sessionId {
+            myId = sessionId
+        }
     }
 }

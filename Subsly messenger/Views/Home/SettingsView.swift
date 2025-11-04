@@ -17,6 +17,8 @@ struct SettingsView: View {
     @State private var statusMessage: String?
     @State private var statusIsError = false
     @State private var bioText: String
+    @State private var showsOnlineStatus: Bool
+    @State private var isUpdatingStatusPreference = false
     @FocusState private var isBioFocused: Bool
 
     init(currentUser: AppUser, onClose: (() -> Void)? = nil) {
@@ -24,12 +26,14 @@ struct SettingsView: View {
         self.onClose = onClose
         _workingUser = State(initialValue: currentUser)
         _bioText = State(initialValue: currentUser.bio ?? "")
+        _showsOnlineStatus = State(initialValue: !currentUser.isStatusHidden)
     }
 
     var body: some View {
         NavigationStack {
             List {
                 profileSection
+                statusSection
                 aboutSection
                 accountSection
             }
@@ -40,9 +44,7 @@ struct SettingsView: View {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button {
                         if let onClose {
-                            withAnimation {
-                                onClose()
-                            }
+                            withAnimation { onClose() }
                         }
                         dismiss()
                     } label: {
@@ -56,6 +58,7 @@ struct SettingsView: View {
             if let updated = newValue {
                 workingUser = updated
                 bioText = updated.bio ?? ""
+                showsOnlineStatus = !updated.isStatusHidden
             }
         }
         .onChange(of: pickerItem) { newItem in
@@ -65,6 +68,10 @@ struct SettingsView: View {
         .onChange(of: bioText) { newValue in
             enforceBioLimit(for: newValue)
         }
+        .onChange(of: showsOnlineStatus) { newValue in
+            if isUpdatingStatusPreference { return }
+            Task { await updateStatusPreference(isVisible: newValue) }
+        }
     }
 
     private var profileSection: some View {
@@ -73,7 +80,9 @@ struct SettingsView: View {
                 AvatarView(
                     avatarURL: workingUser.avatarURL,
                     name: displayName,
-                    size: 96
+                    size: 96,
+                    showPresenceIndicator: true,
+                    isOnline: workingUser.isVisiblyOnline && showsOnlineStatus
                 )
                 .frame(maxWidth: .infinity)
 
@@ -83,6 +92,11 @@ struct SettingsView: View {
                     Text("@\(workingUser.handle)")
                         .foregroundStyle(.secondary)
                 }
+
+                Text(presenceSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
 
                 PhotosPicker(selection: $pickerItem, matching: .images) {
                     Label("Change Photo", systemImage: "camera.fill")
@@ -106,6 +120,30 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .center)
             .multilineTextAlignment(.center)
             .padding(.vertical, 4)
+        }
+    }
+
+    private var statusSection: some View {
+        Section("Status") {
+            Toggle(isOn: $showsOnlineStatus) {
+                Label("Show when I'm online", systemImage: "dot.radiowaves.left.and.right")
+            }
+            .disabled(isUpdatingStatusPreference)
+
+            if isUpdatingStatusPreference {
+                ProgressView()
+                    .progressViewStyle(.circular)
+            }
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(presenceSummary)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("Turn this off to appear offline to everyone.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 4)
         }
     }
 
@@ -165,10 +203,16 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section("Account") {
             Button(role: .destructive) {
-                do {
-                    try AuthService.shared.signOut()
-                } catch {
-                    print("Sign out failed:", error)
+                Task {
+                    let uid = session.currentUser?.id ?? workingUser.id
+                    if let uid {
+                        try? await UserService.shared.updatePresence(uid: uid, isOnline: false, recordLastActive: true)
+                    }
+                    do {
+                        try AuthService.shared.signOut()
+                    } catch {
+                        print("Sign out failed:", error)
+                    }
                 }
             } label: {
                 Text("Sign Out")
@@ -188,6 +232,70 @@ struct SettingsView: View {
         let trimmedBio = bioText.trimmingCharacters(in: .whitespacesAndNewlines)
         let currentBio = workingUser.bio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         return trimmedBio != currentBio
+    }
+
+    private var presenceSummary: String {
+        if workingUser.isStatusHidden || !showsOnlineStatus {
+            return "You currently appear offline."
+        }
+        if workingUser.isVisiblyOnline {
+            return "You're online right now."
+        }
+        if let lastSeen = formattedLastSeen(for: workingUser) {
+            return "Last seen \(lastSeen)."
+        }
+        return "You're offline."
+    }
+
+    private func formattedLastSeen(for user: AppUser) -> String? {
+        guard let description = user.lastSeenDescription() else { return nil }
+        let normalized = description.lowercased()
+        if normalized.contains("0 seconds") {
+            return "just now"
+        }
+        return description
+    }
+
+    private func updateStatusPreference(isVisible: Bool) async {
+        guard let uid = session.currentUser?.id ?? workingUser.id else { return }
+        await MainActor.run {
+            isUpdatingStatusPreference = true
+            statusMessage = nil
+            statusIsError = false
+        }
+
+        let appState = UIApplication.shared.applicationState
+        let isActive = appState == .active
+        let shouldRecordLastActive = !isActive
+
+        do {
+            try await UserService.shared.updateStatusVisibility(uid: uid, isHidden: !isVisible)
+            try await UserService.shared.updatePresence(uid: uid,
+                                                        isOnline: isVisible && isActive,
+                                                        recordLastActive: shouldRecordLastActive)
+
+            await MainActor.run {
+                workingUser.isStatusHidden = !isVisible
+                workingUser.isOnline = isVisible && isActive
+                if shouldRecordLastActive {
+                    workingUser.lastActiveAt = Date()
+                }
+                var updatedUser = workingUser
+                updatedUser.id = uid
+                session.currentUser = updatedUser
+                usersStore.upsert(updatedUser)
+            }
+        } catch {
+            await MainActor.run {
+                showsOnlineStatus = !isVisible
+                statusMessage = "Couldn't update your status preference. Please try again."
+                statusIsError = true
+            }
+        }
+
+        await MainActor.run {
+            isUpdatingStatusPreference = false
+        }
     }
 
     private func processSelection(_ item: PhotosPickerItem) async {

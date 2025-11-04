@@ -35,12 +35,17 @@ struct PeopleSearchView: View {
                                 AvatarView(
                                     avatarURL: user.avatarURL,
                                     name: displayName(for: user),
-                                    size: 40
+                                    size: 40,
+                                    showPresenceIndicator: true,
+                                    isOnline: user.isVisiblyOnline
                                 )
 
-                                VStack(alignment: .leading) {
+                                VStack(alignment: .leading, spacing: 2) {
                                     Text("@\(user.handle)").bold()
                                     Text(displayName(for: user))
+                                        .foregroundStyle(.secondary)
+                                    Text(statusLine(for: user))
+                                        .font(.caption)
                                         .foregroundStyle(.secondary)
                                 }
                             }
@@ -61,6 +66,24 @@ struct PeopleSearchView: View {
     private func displayName(for user: AppUser) -> String {
         let trimmed = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? user.handle : trimmed
+    }
+
+    private func statusLine(for user: AppUser) -> String {
+        if user.isStatusHidden { return "Offline" }
+        if user.isVisiblyOnline { return "Online" }
+        if let lastSeen = formattedLastSeen(for: user) {
+            return "Last seen \(lastSeen)"
+        }
+        return "Offline"
+    }
+
+    private func formattedLastSeen(for user: AppUser) -> String? {
+        guard let description = user.lastSeenDescription() else { return nil }
+        let normalized = description.lowercased()
+        if normalized.contains("0 seconds") {
+            return "just now"
+        }
+        return description
     }
 
     private func search() async {
@@ -90,13 +113,19 @@ struct PeopleSearchView: View {
                 let avatar = data["avatarURL"] as? String
                 let ts = data["createdAt"] as? Timestamp
                 let bio = data["bio"] as? String
+                let isOnline = data["isOnline"] as? Bool ?? false
+                let lastActive = (data["lastActiveAt"] as? Timestamp)?.dateValue()
+                let isStatusHidden = data["isStatusHidden"] as? Bool ?? false
                 let u = AppUser(
                     id: doc.documentID,
                     handle: handle,
                     displayName: display,
                     avatarURL: avatar,
                     bio: bio,
-                    createdAt: ts?.dateValue()
+                    createdAt: ts?.dateValue(),
+                    isOnline: isOnline,
+                    lastActiveAt: lastActive,
+                    isStatusHidden: isStatusHidden
                 )
                 if u.id != currentUser.id { list.append(u) }
             }
