@@ -7,7 +7,11 @@ actor UserService {
     private var db: Firestore { Firestore.firestore() }
 
     // Create or update profile on sign-up
-    func createUserProfile(uid: String, handle: String, displayName: String, avatarURL: String? = nil) async throws {
+    func createUserProfile(uid: String,
+                           handle: String,
+                           displayName: String,
+                           avatarURL: String? = nil,
+                           bio: String? = nil) async throws {
         var payload: [String: Any] = [
             "handle": handle,
             "handleLower": handle.lowercased(),
@@ -16,6 +20,9 @@ actor UserService {
         ]
         if let avatarURL, !avatarURL.isEmpty {
             payload["avatarURL"] = avatarURL
+        }
+        if let bio, !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["bio"] = bio
         }
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
@@ -38,11 +45,13 @@ actor UserService {
         let displayName = (data["displayName"] as? String) ?? handle
         let avatarURL = data["avatarURL"] as? String
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue()
+        let bio = data["bio"] as? String
         return await MainActor.run {
             AppUser(id: id,
                     handle: handle,
                     displayName: displayName,
                     avatarURL: avatarURL,
+                    bio: bio,
                     createdAt: createdAt)
         }
     }
@@ -69,5 +78,20 @@ actor UserService {
     func saveFCMToken(uid: String, token: String) async throws {
         try await db.collection("users").document(uid)
             .setData(["fcmToken": token], merge: true)
+    }
+
+    func updateProfile(uid: String, displayName: String, bio: String?) async throws {
+        var payload: [String: Any] = [
+            "displayName": displayName,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+
+        if let bio, !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            payload["bio"] = bio
+        } else {
+            payload["bio"] = FieldValue.delete()
+        }
+
+        try await db.collection("users").document(uid).setData(payload, merge: true)
     }
 }

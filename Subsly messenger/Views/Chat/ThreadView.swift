@@ -3,6 +3,7 @@ import FirebaseFirestore
 
 struct ThreadView: View {
     @EnvironmentObject private var threadsStore: ThreadsStore
+    @EnvironmentObject private var usersStore: UsersStore
     let currentUser: AppUser
     let otherUID: String
 
@@ -36,6 +37,7 @@ struct ThreadView: View {
     @State private var isLoadingMore: Bool = false
     @State private var restoreScrollToId: String?
     @State private var hasPerformedInitialScroll = false
+    @State private var showingProfile = false
 
     private let bottomContentPadding: CGFloat = 80
 
@@ -128,8 +130,13 @@ struct ThreadView: View {
                     scrollToBottom(proxy: proxy, animated: true)
                 }
             }
-            .navigationTitle("Chat")
+            .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .principal) {
+                    profileHeader
+                }
+            }
             .toolbar(.hidden, for: .tabBar)
 
             // Bottom bar (composer)
@@ -155,6 +162,7 @@ struct ThreadView: View {
             }
 
             .task { await openThreadIfNeeded() }
+            .task { await usersStore.ensure(uid: otherUID) }
             .onAppear {
                 // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
@@ -170,6 +178,9 @@ struct ThreadView: View {
                 if let tid = threadId, !myId.isEmpty {
                     Task { try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false) }
                 }
+            }
+            .navigationDestination(isPresented: $showingProfile) {
+                UserProfileView(userId: otherUID)
             }
         }
     }
@@ -407,5 +418,52 @@ struct ThreadView: View {
         } else {
             proxy.scrollTo(targetId, anchor: .bottom)
         }
+    }
+
+    private var otherUser: AppUser? { usersStore.user(for: otherUID) }
+
+    private var otherDisplayName: String {
+        guard let user = otherUser else { return "" }
+        let trimmed = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? user.handle : trimmed
+    }
+
+    private var otherHandleText: String {
+        if let user = otherUser {
+            return "@\(user.handle)"
+        }
+        return "@\(otherUID.prefix(6))"
+    }
+
+    private var otherAvatarURL: String? { otherUser?.avatarURL }
+
+    private var otherAvatarLabel: String {
+        if let user = otherUser {
+            let trimmed = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return trimmed.isEmpty ? user.handle : trimmed
+        }
+        return "User \(otherUID.prefix(6))"
+    }
+
+    private var profileHeader: some View {
+        Button(action: { showingProfile = true }) {
+            HStack(spacing: 12) {
+                AvatarView(avatarURL: otherAvatarURL, name: otherAvatarLabel, size: 32)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(otherDisplayName.isEmpty ? "Chat" : otherDisplayName)
+                        .font(.headline)
+                        .foregroundStyle(Color.primary)
+                        .lineLimit(1)
+                    Text(otherHandleText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+            }
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement()
+        .accessibilityLabel("View profile for \(otherDisplayName.isEmpty ? "this conversation" : otherDisplayName)")
+        .accessibilityHint("Opens profile details")
     }
 }

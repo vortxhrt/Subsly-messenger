@@ -11,29 +11,39 @@ struct SettingsView: View {
     @State private var workingUser: AppUser
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploading = false
+    @State private var isSavingProfile = false
     @State private var statusMessage: String?
     @State private var statusIsError = false
+    @State private var bioText: String
 
     init(currentUser: AppUser) {
         self.currentUser = currentUser
         _workingUser = State(initialValue: currentUser)
+        _bioText = State(initialValue: currentUser.bio ?? "")
     }
 
     var body: some View {
         NavigationStack {
             List {
                 profileSection
+                aboutSection
                 accountSection
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
         }
         .onChange(of: session.currentUser) { _, newValue in
-            if let updated = newValue { workingUser = updated }
+            if let updated = newValue {
+                workingUser = updated
+                bioText = updated.bio ?? ""
+            }
         }
         .onChange(of: pickerItem) { _, newItem in
             guard let newItem else { return }
             Task { await processSelection(newItem) }
+        }
+        .onChange(of: bioText) { _, newValue in
+            enforceBioLimit(for: newValue)
         }
     }
 
@@ -79,6 +89,55 @@ struct SettingsView: View {
         }
     }
 
+    private var aboutSection: some View {
+        Section("About") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Bio")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+
+                ZStack(alignment: .topLeading) {
+                    if bioText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                        Text("Share a few words about yourself")
+                            .foregroundStyle(Color.secondary)
+                            .padding(.top, 8)
+                            .padding(.horizontal, 6)
+                    }
+
+                    TextEditor(text: $bioText)
+                        .frame(minHeight: 120)
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 12)
+                                .stroke(Color(.quaternaryLabel))
+                        )
+                        .padding(.horizontal, -4)
+                        .padding(.vertical, -4)
+                }
+
+                HStack {
+                    Spacer()
+                    Text("\(bioText.count)/\(bioLimit)")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Button(action: { Task { await saveProfile() } }) {
+                    if isSavingProfile {
+                        ProgressView()
+                            .tint(.white)
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Text("Save Profile")
+                            .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(!profileHasChanges || isSavingProfile)
+            }
+            .padding(.vertical, 4)
+        }
+    }
+
     private var accountSection: some View {
         Section("Account") {
             Button(role: .destructive) {
@@ -97,6 +156,14 @@ struct SettingsView: View {
     private var displayName: String {
         let trimmed = workingUser.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? workingUser.handle : trimmed
+    }
+
+    private var bioLimit: Int { 160 }
+
+    private var profileHasChanges: Bool {
+        let trimmedBio = bioText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let currentBio = workingUser.bio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmedBio != currentBio
     }
 
     private func processSelection(_ item: PhotosPickerItem) async {
@@ -146,6 +213,57 @@ struct SettingsView: View {
             isUploading = false
             pickerItem = nil
         }
+    }
+
+    private func enforceBioLimit(for value: String) {
+        if value.count > bioLimit {
+            bioText = String(value.prefix(bioLimit))
+        }
+    }
+
+    private func saveProfile() async {
+        let uid: String
+        if let current = session.currentUser, let id = current.id {
+            uid = id
+        } else if let id = workingUser.id {
+            uid = id
+        } else {
+            return
+        }
+
+        let trimmedBio = bioText.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        await MainActor.run {
+            isSavingProfile = true
+            statusMessage = nil
+            statusIsError = false
+        }
+
+        do {
+            try await UserService.shared.updateProfile(
+                uid: uid,
+                displayName: workingUser.displayName,
+                bio: trimmedBio.isEmpty ? nil : trimmedBio
+            )
+
+            await MainActor.run {
+                workingUser.bio = trimmedBio.isEmpty ? nil : trimmedBio
+                bioText = trimmedBio
+                var updatedUser = workingUser
+                updatedUser.id = uid
+                session.currentUser = updatedUser
+                usersStore.upsert(updatedUser)
+                statusMessage = "Profile updated."
+                statusIsError = false
+            }
+        } catch {
+            await MainActor.run {
+                statusMessage = error.localizedDescription
+                statusIsError = true
+            }
+        }
+
+        await MainActor.run { isSavingProfile = false }
     }
 
     private func resizedImage(from image: UIImage, maxDimension: CGFloat = 720) -> UIImage {

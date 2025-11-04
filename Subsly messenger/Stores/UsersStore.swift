@@ -37,6 +37,8 @@ final class UsersStore: ObservableObject {
     private func fallbackUser(for uid: String) -> AppUser {
         AppUser(id: uid,
                 handle: "user\(uid.prefix(6))",
-                displayName: "User \(uid.prefix(6))")
+                displayName: "User \(uid.prefix(6))",
+                avatarURL: nil,
+                bio: nil)
     }
 }

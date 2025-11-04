@@ -89,11 +89,13 @@ struct PeopleSearchView: View {
                 let display = data["displayName"] as? String ?? handle
                 let avatar = data["avatarURL"] as? String
                 let ts = data["createdAt"] as? Timestamp
+                let bio = data["bio"] as? String
                 let u = AppUser(
                     id: doc.documentID,
                     handle: handle,
                     displayName: display,
                     avatarURL: avatar,
+                    bio: bio,
                     createdAt: ts?.dateValue()
                 )
                 if u.id != currentUser.id { list.append(u) }
