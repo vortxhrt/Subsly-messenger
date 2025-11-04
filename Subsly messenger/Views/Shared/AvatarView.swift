@@ -1,8 +1,3 @@
-Subsly messenger/Views/Shared/AvatarView.swift
-New
-+75
--0
-
 import SwiftUI
 
 struct AvatarView: View {
@@ -14,19 +9,27 @@ struct AvatarView: View {
         let components = name
             .split(separator: " ")
             .filter { !$0.isEmpty }
-        if components.isEmpty {
+
+        guard let firstComponent = components.first else {
             return "?"
         }
-        let first = components.first?.prefix(1) ?? "?"
-        let last = components.dropFirst().first?.prefix(1)
-        if let last, !last.isEmpty {
-            return (String(first) + String(last)).uppercased()
+
+        let firstInitial = String(firstComponent.prefix(1)).uppercased()
+
+        guard let secondComponent = components.dropFirst().first else {
+            return firstInitial
         }
-        return String(first).uppercased()
+
+        let secondInitial = String(secondComponent.prefix(1)).uppercased()
+        return firstInitial + secondInitial
     }
 
     private var remoteURL: URL? {
-        guard let avatarURL, let url = URL(string: avatarURL) else { return nil }
+        guard let avatarURL = avatarURL,
+              let url = URL(string: avatarURL),
+              !avatarURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
         return url
     }
 
@@ -34,14 +37,15 @@ struct AvatarView: View {
         ZStack {
             if let url = remoteURL {
                 CachedAsyncImage(url: url) { phase in
-                    if let image = phase.image {
+                    switch phase {
+                    case .success(let image):
                         Image(uiImage: image)
                             .resizable()
                             .scaledToFill()
-                    } else if phase.isLoading {
+                    case .loading:
                         ProgressView()
                             .progressViewStyle(.circular)
-                    } else {
+                    case .failure, .empty:
                         placeholder
                     }
                 }
@@ -63,7 +67,7 @@ struct AvatarView: View {
             .overlay(
                 Text(initials)
                     .font(.system(size: size * 0.4, weight: .semibold))
-                    .foregroundStyle(Color(.systemGray))
+                    .foregroundColor(Color(.systemGray))
             )
     }
 }
@@ -73,6 +77,7 @@ struct AvatarView_Previews: PreviewProvider {
         VStack(spacing: 20) {
             AvatarView(avatarURL: nil, name: "Taylor Swift", size: 48)
             AvatarView(avatarURL: nil, name: "A", size: 48)
+            AvatarView(avatarURL: "https://example.com/avatar.png", name: "Sam Sample", size: 48)
         }
         .padding()
         .previewLayout(.sizeThatFits)
