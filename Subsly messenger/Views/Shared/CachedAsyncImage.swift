@@ -50,17 +50,92 @@ final class ImageCache {
     }
 }
 
+final class DiskImageCache {
+    static let shared = DiskImageCache()
+
+    private let directory: URL
+    private let ioQueue = DispatchQueue(label: "DiskImageCache.io", qos: .utility)
+
+    private init() {
+        let cachesDirectory = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first ?? FileManager.default.temporaryDirectory
+        directory = cachesDirectory.appendingPathComponent("AvatarImageCache", isDirectory: true)
+
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        } catch {
+            #if DEBUG
+            print("DiskImageCache directory creation failed: \(error)")
+            #endif
+        }
+    }
+
+    func cachedImage(for url: URL) -> UIImage? {
+        let fileURL = self.fileURL(for: url)
+        return ioQueue.sync {
+            guard let data = try? Data(contentsOf: fileURL) else { return nil }
+            return UIImage(data: data)
+        }
+    }
+
+    func image(for url: URL, completion: @escaping (UIImage?) -> Void) {
+        let fileURL = self.fileURL(for: url)
+        ioQueue.async {
+            guard let data = try? Data(contentsOf: fileURL),
+                  let image = UIImage(data: data) else {
+                DispatchQueue.main.async {
+                    completion(nil)
+                }
+                return
+            }
+
+            DispatchQueue.main.async {
+                completion(image)
+            }
+        }
+    }
+
+    func store(_ data: Data, for url: URL) {
+        let fileURL = self.fileURL(for: url)
+        ioQueue.async {
+            do {
+                try data.write(to: fileURL, options: .atomic)
+            } catch {
+                #if DEBUG
+                print("DiskImageCache store failed: \(error)")
+                #endif
+            }
+        }
+    }
+
+    private func fileURL(for url: URL) -> URL {
+        let encodedName = url.absoluteString.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? UUID().uuidString
+        return directory.appendingPathComponent(encodedName).appendingPathExtension("imgcache")
+    }
+}
+
 struct CachedAsyncImage<Content: View>: View {
     private let url: URL
     private let content: (CachedAsyncImagePhase) -> Content
 
-    @State private var phase: CachedAsyncImagePhase = .empty
+    @State private var phase: CachedAsyncImagePhase
     @State private var activeTask: URLSessionDataTask?
     @State private var currentURL: URL?
 
     init(url: URL, @ViewBuilder content: @escaping (CachedAsyncImagePhase) -> Content) {
         self.url = url
         self.content = content
+
+        if let cached = ImageCache.shared.image(for: url) {
+            _phase = State(initialValue: .success(cached))
+        } else if let diskImage = DiskImageCache.shared.cachedImage(for: url) {
+            ImageCache.shared.insert(diskImage, for: url)
+            _phase = State(initialValue: .success(diskImage))
+        } else {
+            _phase = State(initialValue: .empty)
+        }
+
+        _activeTask = State(initialValue: nil)
+        _currentURL = State(initialValue: nil)
     }
 
     var body: some View {
@@ -92,12 +167,25 @@ struct CachedAsyncImage<Content: View>: View {
 
         if let cached = ImageCache.shared.image(for: url) {
             phase = .success(cached)
+            beginNetworkLoad(for: url)
             return
         }
 
         phase = .loading
 
-        let request = URLRequest(url: url)
+        DiskImageCache.shared.image(for: url) { image in
+            guard self.currentURL == url else { return }
+            if let image {
+                ImageCache.shared.insert(image, for: url)
+                self.phase = .success(image)
+            }
+        }
+
+        beginNetworkLoad(for: url)
+    }
+
+    private func beginNetworkLoad(for url: URL) {
+        let request = URLRequest(url: url, cachePolicy: .returnCacheDataElseLoad, timeoutInterval: 60)
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 if let urlError = error as? URLError, urlError.code == .cancelled {
@@ -121,6 +209,7 @@ struct CachedAsyncImage<Content: View>: View {
             }
 
             ImageCache.shared.insert(image, for: url)
+            DiskImageCache.shared.store(data, for: url)
 
             DispatchQueue.main.async {
                 if self.currentURL == url {
@@ -136,10 +225,12 @@ struct CachedAsyncImage<Content: View>: View {
 
     private func publishFailure(_ error: Error, for url: URL) {
         DispatchQueue.main.async {
-            if self.currentURL == url {
-                self.phase = .failure(error)
-                self.activeTask = nil
+            guard self.currentURL == url else { return }
+            if case .success = self.phase {
+                return
             }
+            self.phase = .failure(error)
+            self.activeTask = nil
         }
     }
 
