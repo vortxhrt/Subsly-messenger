@@ -35,15 +35,35 @@ private struct ThreadRow: View {
     let currentUser: AppUser
     let thread: ThreadModel
 
+    private var otherUser: AppUser? { usersStore.user(for: otherId) }
+
+    private var otherName: String {
+        if let user = otherUser {
+            let preferred = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return preferred.isEmpty ? "@\(user.handle)" : preferred
+        }
+        return "User \(otherId.prefix(6))"
+    }
+
+    private var avatarLabel: String {
+        if let user = otherUser {
+            let preferred = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            return preferred.isEmpty ? user.handle : preferred
+        }
+        return "User \(otherId.prefix(6))"
+    }
+
     var body: some View {
         NavigationLink {
             ThreadView(currentUser: currentUser, otherUID: otherId)
         } label: {
             HStack(spacing: 12) {
-                Circle().frame(width: 36, height: 36).opacity(0.15)
+                AvatarView(avatarURL: otherUser?.avatarURL,
+                           name: avatarLabel,
+                           size: 40)
 
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(usersStore.name(for: otherId) ?? "User \(otherId.prefix(6))…")
+                    Text(otherName)
                         .fontWeight(.semibold)
 
                     // Live preview: typing or last message text

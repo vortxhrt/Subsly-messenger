@@ -44,15 +44,19 @@ struct ComposerView: View {
                         onTyping(false)
                     }
                 }
-
             Button(action: sendTapped) {
                 Image(systemName: "paperplane.fill")
-                    .font(.system(size: 18, weight: .semibold))
-                    .padding(14)
+                    .font(.system(size: 16, weight: .semibold))
+                    .frame(width: 22, height: 22)
+                    .padding(.horizontal, innerH)
+                    .padding(.vertical, innerV)
+                    .background(
+                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                            .fill(Color.accentColor)
+                    )
             }
-            .background(Color.accentColor)
+            .buttonStyle(.plain)
             .foregroundStyle(.white)
-            .clipShape(Circle())
             .disabled(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             .opacity(text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.4 : 1.0)
             .accessibilityLabel("Send")
