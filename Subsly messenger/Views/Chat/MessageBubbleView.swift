@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 enum DeliveryState {
     case pending   // sending (show spinner)
@@ -9,11 +10,13 @@ enum DeliveryState {
 
 struct MessageBubbleView: View {
     let text: String
+    let media: MessageModel.Media?
     let isMe: Bool
     let createdAt: Date?
     let isExpanded: Bool
     let status: DeliveryState?       // only used for outgoing (isMe == true)
     let onTap: () -> Void
+    var onAttachmentTap: (MessageModel.Media) -> Void = { _ in }
 
     // Small margin from the screen edge (messages only)
     private let edgeInset: CGFloat = 10
@@ -25,38 +28,54 @@ struct MessageBubbleView: View {
     }
 
     var body: some View {
-        VStack(alignment: isMe ? .trailing : .leading, spacing: 4) {
-            HStack(spacing: 0) {
-                if isMe {
-                    Spacer(minLength: 0)
-
-                    Text(text)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
-                        .foregroundStyle(.white)
-                        .background(Color.accentColor)
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
-                        .padding(.trailing, edgeInset)   // small right gap
-                } else {
-                    Text(text)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
-                        .foregroundStyle(.primary)
-                        .background(Color(.secondarySystemFill))
-                        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                        .padding(.leading, edgeInset)    // small left gap
-
-                    Spacer(minLength: 0)
+        VStack(alignment: isMe ? .trailing : .leading, spacing: 6) {
+            if let media {
+                HStack(spacing: 0) {
+                    if isMe { Spacer(minLength: 0) }
+                    MediaAttachmentView(media: media)
+                        .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
+                        .padding(.leading, isMe ? 0 : edgeInset)
+                        .padding(.trailing, isMe ? edgeInset : 0)
+                        .onTapGesture {
+                            onAttachmentTap(media)
+                            onTap()
+                        }
+                    if !isMe { Spacer(minLength: 0) }
                 }
             }
-            .contentShape(Rectangle())
-            .onTapGesture(perform: onTap)
 
-            // Timestamp + ticks shown only when expanded, then auto-hide (controlled by parent).
+            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                HStack(spacing: 0) {
+                    if isMe {
+                        Spacer(minLength: 0)
+
+                        Text(text)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 14)
+                            .foregroundStyle(.white)
+                            .background(Color.accentColor)
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
+                            .padding(.trailing, edgeInset)   // small right gap
+                    } else {
+                        Text(text)
+                            .padding(.vertical, 10)
+                            .padding(.horizontal, 14)
+                            .foregroundStyle(.primary)
+                            .background(Color(.secondarySystemFill))
+                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
+                            .padding(.leading, edgeInset)    // small left gap
+
+                        Spacer(minLength: 0)
+                    }
+                }
+                .contentShape(Rectangle())
+                .onTapGesture(perform: onTap)
+            }
+
             if isExpanded {
                 HStack(spacing: 6) {
                     if let createdAt {
@@ -81,7 +100,17 @@ struct MessageBubbleView: View {
     }
 
     private var accessibilityLabel: String {
-        var base = isMe ? "Your message" : "Message"
+        var components: [String] = []
+        if let media {
+            components.append(media.kind == .video ? "Video" : "Photo")
+        }
+        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            components.append(isMe ? "Your message" : "Message")
+        }
+        if components.isEmpty {
+            components.append(isMe ? "Your message" : "Message")
+        }
+        var base = components.joined(separator: ", ")
         if let createdAt {
             base += ", sent \(Self.fullAccessLabel.string(from: createdAt))"
         }
@@ -145,6 +174,101 @@ struct MessageBubbleView: View {
         f.timeStyle = .short
         return f
     }()
+}
+
+private struct MediaAttachmentView: View {
+    let media: MessageModel.Media
+
+    private var displaySize: CGSize {
+        let maxDimension: CGFloat = 250
+        guard
+            let width = media.width,
+            let height = media.height,
+            width > 0,
+            height > 0
+        else {
+            return CGSize(width: maxDimension, height: maxDimension)
+        }
+
+        var displayWidth = min(maxDimension, CGFloat(width))
+        let ratio = CGFloat(height / width)
+        var displayHeight = displayWidth * ratio
+
+        if displayHeight > maxDimension {
+            displayHeight = maxDimension
+            displayWidth = displayHeight / ratio
+        }
+
+        return CGSize(width: max(displayWidth, 120), height: max(displayHeight, 120))
+    }
+
+    private var imageData: Data? {
+        if let data = media.localData { return data }
+        if let data = media.localThumbnailData { return data }
+        return nil
+    }
+
+    private var imageURL: URL? {
+        if media.kind == .image, let urlString = media.url {
+            return URL(string: urlString)
+        }
+        if media.kind == .video, let urlString = media.thumbnailURL ?? media.url {
+            return URL(string: urlString)
+        }
+        return nil
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            Group {
+                if let data = imageData, let uiImage = UIImage(data: data) {
+                    Image(uiImage: uiImage)
+                        .resizable()
+                        .scaledToFill()
+                } else if let url = imageURL {
+                    AsyncImage(url: url) { phase in
+                        switch phase {
+                        case .success(let image):
+                            image
+                                .resizable()
+                                .scaledToFill()
+                        case .failure:
+                            placeholder
+                        case .empty:
+                            placeholder
+                        @unknown default:
+                            placeholder
+                        }
+                    }
+                } else {
+                    placeholder
+                }
+            }
+            .frame(width: displaySize.width, height: displaySize.height)
+            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .strokeBorder(Color.primary.opacity(0.1))
+            )
+
+            if media.kind == .video {
+                Image(systemName: "play.circle.fill")
+                    .font(.system(size: 30, weight: .bold))
+                    .symbolRenderingMode(.palette)
+                    .foregroundStyle(.white, .black.opacity(0.65))
+                    .padding(10)
+            }
+        }
+    }
+
+    private var placeholder: some View {
+        RoundedRectangle(cornerRadius: 18, style: .continuous)
+            .fill(Color(.secondarySystemFill))
+            .overlay(
+                ProgressView()
+                    .progressViewStyle(.circular)
+            )
+    }
 }
 
 /// Spinner / ticks (shown only when expanded)

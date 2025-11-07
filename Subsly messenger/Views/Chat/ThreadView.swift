@@ -1,5 +1,10 @@
 import SwiftUI
 import FirebaseFirestore
+import PhotosUI
+import UniformTypeIdentifiers
+import AVFoundation
+import AVKit
+import UIKit
 
 struct ThreadView: View {
     @EnvironmentObject private var threadsStore: ThreadsStore
@@ -39,6 +44,13 @@ struct ThreadView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var showingProfile = false
 
+    @State private var pendingAttachment: PendingAttachment?
+    @State private var isProcessingAttachment = false
+    @State private var attachmentTask: Task<Void, Never>?
+    @State private var attachmentErrorMessage: String?
+    @State private var showingAttachmentError = false
+    @State private var mediaViewer: MediaViewerPayload?
+
     private let bottomContentPadding: CGFloat = 80
 
     init(currentUser: AppUser, otherUID: String) {
@@ -48,7 +60,9 @@ struct ThreadView: View {
     }
 
     private var canSend: Bool {
-        return !inputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasAttachment = pendingAttachment != nil
+        return (!trimmed.isEmpty || hasAttachment) && !isProcessingAttachment
     }
 
     var body: some View {
@@ -75,11 +89,15 @@ struct ThreadView: View {
                         ForEach(messages, id: \.id) { msg in
                             MessageBubbleView(
                                 text: msg.text,
+                                media: msg.media,
                                 isMe: msg.senderId == myId,
                                 createdAt: msg.createdAt,
                                 isExpanded: expandedMessageIDs.contains(msg.id),
                                 status: statusForMessage(msg),
-                                onTap: { handleTap(on: msg.id) }
+                                onTap: { handleTap(on: msg.id) },
+                                onAttachmentTap: { media in
+                                    mediaViewer = MediaViewerPayload(media: media)
+                                }
                             )
                         }
 
@@ -145,6 +163,9 @@ struct ThreadView: View {
                     Divider().opacity(0.08)
                     ComposerView(
                         text: $inputText,
+                        attachment: $pendingAttachment,
+                        canSend: canSend,
+                        isProcessingAttachment: isProcessingAttachment,
                         onSend: send,
                         onTyping: { typing in
                             guard let tid = threadId, !myId.isEmpty else { return }
@@ -155,6 +176,15 @@ struct ThreadView: View {
                                     isTyping: typing
                                 )
                             }
+                        },
+                        onPickAttachment: { item in
+                            handleAttachmentSelection(item)
+                        },
+                        onRemoveAttachment: {
+                            if let url = pendingAttachment?.fileURL {
+                                try? FileManager.default.removeItem(at: url)
+                            }
+                            pendingAttachment = nil
                         }
                     )
                 }
@@ -165,6 +195,7 @@ struct ThreadView: View {
             .task { await usersStore.ensure(uid: otherUID) }
             .onAppear {
                 // Defensive first pass (in case messages already present)
+                setupReceiptsIfNeeded()
                 markIncomingAsDelivered()
                 markIncomingAsRead()
                 #if DEBUG
@@ -175,12 +206,21 @@ struct ThreadView: View {
                 listener?.remove(); listener = nil
                 typingListener?.remove(); typingListener = nil
                 cleanupReceiptListeners()
+                attachmentTask?.cancel(); attachmentTask = nil
                 if let tid = threadId, !myId.isEmpty {
                     Task { try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false) }
                 }
             }
             .navigationDestination(isPresented: $showingProfile) {
                 UserProfileView(userId: otherUID)
+            }
+            .alert("Attachment Error", isPresented: $showingAttachmentError, presenting: attachmentErrorMessage) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { message in
+                Text(message)
+            }
+            .fullScreenCover(item: $mediaViewer) { payload in
+                MediaViewerView(media: payload.media)
             }
         }
     }
@@ -194,10 +234,12 @@ struct ThreadView: View {
         if pendingOutgoingIDs.contains(msg.id) {
             return .pending
         }
-        if readByOther.contains(msg.id) {
+        let readSet = Set(msg.readBy).union(readByOther.contains(msg.id) ? [otherUID] : [])
+        if readSet.contains(otherUID) {
             return .read
         }
-        if deliveredByOther.contains(msg.id) {
+        let deliveredSet = Set(msg.deliveredTo).union(deliveredByOther.contains(msg.id) ? [otherUID] : [])
+        if deliveredSet.contains(otherUID) {
             return .delivered
         }
         return .sent
@@ -207,27 +249,58 @@ struct ThreadView: View {
 
     private func setupReceiptsIfNeeded() {
         guard let tid = threadId else { return }
-        // Attach a receipts listener for each outgoing message if not already attached.
+
+        var activeMessageIDs: Set<String> = []
         for msg in messages where msg.senderId == myId {
+            activeMessageIDs.insert(msg.id)
+
+            if msg.deliveredTo.contains(otherUID) {
+                deliveredByOther.insert(msg.id)
+            } else {
+                deliveredByOther.remove(msg.id)
+            }
+
+            if msg.readBy.contains(otherUID) {
+                readByOther.insert(msg.id)
+            } else {
+                readByOther.remove(msg.id)
+            }
+
             if receiptListeners[msg.id] == nil {
-                let l = ReceiptsService.shared.listenReceipts(threadId: tid, messageId: msg.id) { delivered, read in
+                let listener = ReceiptsService.shared.listenReceipts(threadId: tid, messageId: msg.id) { delivered, read in
                     Task { @MainActor in
                         if delivered.contains(self.otherUID) {
                             self.deliveredByOther.insert(msg.id)
+                        } else {
+                            self.deliveredByOther.remove(msg.id)
                         }
+
                         if read.contains(self.otherUID) {
                             self.readByOther.insert(msg.id)
+                        } else {
+                            self.readByOther.remove(msg.id)
                         }
                     }
                 }
-                receiptListeners[msg.id] = l
+                receiptListeners[msg.id] = listener
             }
+        }
+
+        for (id, listener) in receiptListeners where !activeMessageIDs.contains(id) {
+            listener.remove()
+            receiptListeners.removeValue(forKey: id)
+            deliveredByOther.remove(id)
+            readByOther.remove(id)
         }
     }
 
     private func cleanupReceiptListeners() {
-        for (_, l) in receiptListeners { l.remove() }
+        for (_, listener) in receiptListeners {
+            listener.remove()
+        }
         receiptListeners.removeAll()
+        deliveredByOther.removeAll()
+        readByOther.removeAll()
     }
 
     /// Mark *incoming* messages as delivered and read (idempotent).
@@ -307,7 +380,7 @@ struct ThreadView: View {
         guard let tid = threadId else { return }
 
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return }
+        guard !trimmed.isEmpty || pendingAttachment != nil else { return }
 
         // Create a local outgoing message with a unique id and mark as pending.
         let localId = "local-" + UUID().uuidString
@@ -315,15 +388,32 @@ struct ThreadView: View {
             id: localId,
             senderId: myId,
             text: trimmed,
-            createdAt: Date()
+            createdAt: Date(),
+            media: pendingAttachment?.asMessageMedia(),
+            deliveredTo: [],
+            readBy: []
         )
         pendingOutgoingIDs.insert(localId)
         messages.append(local)
         inputText = ""
+        let attachmentCopy = pendingAttachment
+        pendingAttachment = nil
 
         // Fire off the real send; when it completes, clear pending for that local id.
         Task {
-            try? await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
+            do {
+                try await ChatService.shared.sendMessage(
+                    threadId: tid,
+                    from: myId,
+                    text: trimmed,
+                    attachment: attachmentCopy
+                )
+            } catch {
+                if let url = attachmentCopy?.fileURL {
+                    try? FileManager.default.removeItem(at: url)
+                }
+                print("Send message failed: \(error.localizedDescription)")
+            }
             await MainActor.run {
                 pendingOutgoingIDs.remove(localId)
             }
@@ -340,6 +430,122 @@ struct ThreadView: View {
     private func purgeStalePendingIDs() {
         let present = Set(messages.map { $0.id })
         pendingOutgoingIDs = pendingOutgoingIDs.intersection(present)
+    }
+
+    private func handleAttachmentSelection(_ item: PhotosPickerItem) {
+        attachmentTask?.cancel()
+        isProcessingAttachment = true
+        attachmentTask = Task {
+            do {
+                let attachment = try await prepareAttachment(from: item)
+                await MainActor.run {
+                    if let oldURL = self.pendingAttachment?.fileURL {
+                        try? FileManager.default.removeItem(at: oldURL)
+                    }
+                    self.pendingAttachment = attachment
+                    self.isProcessingAttachment = false
+                }
+            } catch {
+                await MainActor.run {
+                    self.isProcessingAttachment = false
+                    self.attachmentErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.showingAttachmentError = true
+                }
+            }
+            await MainActor.run {
+                self.attachmentTask = nil
+            }
+        }
+    }
+
+    private func prepareAttachment(from item: PhotosPickerItem) async throws -> PendingAttachment {
+        if let data = try await item.loadTransferable(type: Data.self) {
+            if let image = UIImage(data: data) {
+                let maxDimension: CGFloat = 1600
+                let resized = image.resizedMaintainingAspect(maxDimension: maxDimension)
+                guard let jpegData = resized.jpegData(compressionQuality: 0.75) else {
+                    throw AttachmentPreparationError.imageEncodingFailed
+                }
+                return PendingAttachment(kind: .image(
+                    data: jpegData,
+                    width: Int(resized.size.width),
+                    height: Int(resized.size.height)
+                ))
+            }
+        }
+
+        if let video = try await item.loadTransferable(type: PickedVideo.self) {
+            let compressedURL = try await compressVideo(at: video.url)
+            try? FileManager.default.removeItem(at: video.url)
+            let asset = AVAsset(url: compressedURL)
+            let dimensions = videoDimensions(for: asset)
+            let thumbnail = try generateThumbnail(for: asset)
+            guard let thumbnailData = thumbnail.jpegData(compressionQuality: 0.7) else {
+                throw AttachmentPreparationError.thumbnailFailed
+            }
+            let duration = CMTimeGetSeconds(asset.duration)
+            return PendingAttachment(kind: .video(
+                fileURL: compressedURL,
+                thumbnailData: thumbnailData,
+                width: Int(dimensions.width),
+                height: Int(dimensions.height),
+                duration: duration
+            ))
+        }
+
+        throw AttachmentPreparationError.unsupported
+    }
+
+    private func compressVideo(at url: URL) async throws -> URL {
+        let asset = AVAsset(url: url)
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetMediumQuality) else {
+            throw AttachmentPreparationError.videoEncodingFailed
+        }
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp4")
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mp4
+        exportSession.shouldOptimizeForNetworkUse = true
+
+        try await withCheckedThrowingContinuation { continuation in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    continuation.resume(returning: outputURL)
+                case .failed, .cancelled:
+                    let error = exportSession.error ?? AttachmentPreparationError.videoEncodingFailed
+                    continuation.resume(throwing: error)
+                default:
+                    let error = exportSession.error ?? AttachmentPreparationError.videoEncodingFailed
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+
+        return outputURL
+    }
+
+    private func videoDimensions(for asset: AVAsset) -> CGSize {
+        guard let track = asset.tracks(withMediaType: .video).first else {
+            return CGSize(width: 720, height: 1280)
+        }
+        let transformed = track.naturalSize.applying(track.preferredTransform)
+        return CGSize(width: abs(transformed.width), height: abs(transformed.height))
+    }
+
+    private func generateThumbnail(for asset: AVAsset) throws -> UIImage {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        let durationSeconds = CMTimeGetSeconds(asset.duration)
+        let captureTime = CMTime(seconds: min(max(durationSeconds / 3.0, 0.1), 1.0), preferredTimescale: 600)
+        let cgImage = try generator.copyCGImage(at: captureTime, actualTime: nil)
+        return UIImage(cgImage: cgImage)
     }
 
     // MARK: - Thread bootstrap + listeners
@@ -465,5 +671,184 @@ struct ThreadView: View {
         .accessibilityElement()
         .accessibilityLabel("View profile for \(otherDisplayName.isEmpty ? "this conversation" : otherDisplayName)")
         .accessibilityHint("Opens profile details")
+    }
+}
+
+// MARK: - Media viewer support
+
+private struct MediaViewerPayload: Identifiable {
+    let id = UUID()
+    let media: MessageModel.Media
+}
+
+private struct MediaViewerView: View {
+    let media: MessageModel.Media
+    @Environment(\.dismiss) private var dismiss
+    @State private var videoPlayer: AVPlayer?
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+
+            content
+                .padding()
+        }
+        .overlay(alignment: .topLeading) {
+            Button {
+                dismiss()
+            } label: {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 32, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.9))
+                    .padding()
+            }
+            .accessibilityLabel("Close media viewer")
+        }
+        .onDisappear {
+            videoPlayer?.pause()
+            videoPlayer = nil
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        switch media.kind {
+        case .image:
+            if let image = resolvedImage() {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else if let url = resolvedImageURL() {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    case .empty:
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    case .failure:
+                        placeholder
+                    @unknown default:
+                        placeholder
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                placeholder
+            }
+
+        case .video:
+            if let url = resolvedVideoURL() {
+                VideoPlayer(player: player(for: url))
+                    .ignoresSafeArea()
+                    .onAppear {
+                        videoPlayer?.play()
+                    }
+                    .onDisappear {
+                        videoPlayer?.pause()
+                    }
+            } else if let image = resolvedImage() {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                placeholder
+            }
+        }
+    }
+
+    private func player(for url: URL) -> AVPlayer {
+        if let existing = videoPlayer {
+            return existing
+        }
+        let player = AVPlayer(url: url)
+        videoPlayer = player
+        return player
+    }
+
+    private func resolvedImage() -> UIImage? {
+        if let data = media.localData, let image = UIImage(data: data) {
+            return image
+        }
+        if let data = media.localThumbnailData, let image = UIImage(data: data) {
+            return image
+        }
+        return nil
+    }
+
+    private func resolvedImageURL() -> URL? {
+        if media.kind == .image, let urlString = media.url {
+            return URL(string: urlString)
+        }
+        if media.kind == .video, let thumb = media.thumbnailURL ?? media.url {
+            return URL(string: thumb)
+        }
+        return nil
+    }
+
+    private func resolvedVideoURL() -> URL? {
+        guard media.kind == .video, let urlString = media.url else {
+            return nil
+        }
+        return URL(string: urlString)
+    }
+
+    private var placeholder: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.white)
+            Text("Loading media…")
+                .foregroundColor(.white.opacity(0.7))
+                .font(.callout)
+        }
+    }
+}
+
+private enum AttachmentPreparationError: LocalizedError {
+    case unsupported
+    case imageEncodingFailed
+    case videoEncodingFailed
+    case thumbnailFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .unsupported:
+            return "The selected item cannot be shared as a message."
+        case .imageEncodingFailed:
+            return "We couldn't process that image. Try a different photo."
+        case .videoEncodingFailed:
+            return "We couldn't process that video. Try again with a different clip."
+        case .thumbnailFailed:
+            return "The video thumbnail failed to generate."
+        }
+    }
+}
+
+private struct PickedVideo: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(importedContentType: .movie) { received in
+            let originalExtension = received.file.pathExtension
+            let resolvedExtension: String
+            if !originalExtension.isEmpty {
+                resolvedExtension = originalExtension
+            } else if let fallback = UTType.movie.preferredFilenameExtension {
+                resolvedExtension = fallback
+            } else {
+                resolvedExtension = "mov"
+            }
+
+            let temporaryURL = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathExtension(resolvedExtension)
+            try FileManager.default.copyItem(at: received.file, to: temporaryURL)
+            return PickedVideo(url: temporaryURL)
+        }
     }
 }
