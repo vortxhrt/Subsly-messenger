@@ -5,6 +5,7 @@ import UniformTypeIdentifiers
 import AVFoundation
 import AVKit
 import UIKit
+import Combine
 
 struct ThreadView: View {
     @EnvironmentObject private var threadsStore: ThreadsStore
@@ -684,7 +685,7 @@ private struct MediaViewerPayload: Identifiable {
 private struct MediaViewerView: View {
     let media: MessageModel.Media
     @Environment(\.dismiss) private var dismiss
-    @State private var videoPlayer: AVPlayer?
+    @StateObject private var videoController = VideoPlayerController()
 
     var body: some View {
         ZStack {
@@ -705,8 +706,7 @@ private struct MediaViewerView: View {
             .accessibilityLabel("Close media viewer")
         }
         .onDisappear {
-            videoPlayer?.pause()
-            videoPlayer = nil
+            videoController.reset()
         }
     }
 
@@ -742,13 +742,14 @@ private struct MediaViewerView: View {
 
         case .video:
             if let url = resolvedVideoURL() {
-                VideoPlayer(player: player(for: url))
+                VideoPlayer(player: videoController.player)
                     .ignoresSafeArea()
                     .onAppear {
-                        videoPlayer?.play()
+                        videoController.configure(with: url)
+                        videoController.play()
                     }
                     .onDisappear {
-                        videoPlayer?.pause()
+                        videoController.pause()
                     }
             } else if let image = resolvedImage() {
                 Image(uiImage: image)
@@ -759,15 +760,6 @@ private struct MediaViewerView: View {
                 placeholder
             }
         }
-    }
-
-    private func player(for url: URL) -> AVPlayer {
-        if let existing = videoPlayer {
-            return existing
-        }
-        let player = AVPlayer(url: url)
-        videoPlayer = player
-        return player
     }
 
     private func resolvedImage() -> UIImage? {
@@ -806,6 +798,36 @@ private struct MediaViewerView: View {
                 .foregroundColor(.white.opacity(0.7))
                 .font(.callout)
         }
+    }
+}
+
+@MainActor
+private final class VideoPlayerController: ObservableObject {
+    let objectWillChange = ObservableObjectPublisher()
+    let player = AVPlayer()
+    private var currentURL: URL?
+
+    func configure(with url: URL) {
+        guard currentURL != url else { return }
+        currentURL = url
+        let item = AVPlayerItem(url: url)
+        player.replaceCurrentItem(with: item)
+        objectWillChange.send()
+    }
+
+    func play() {
+        player.play()
+    }
+
+    func pause() {
+        player.pause()
+    }
+
+    func reset() {
+        pause()
+        player.replaceCurrentItem(with: nil)
+        currentURL = nil
+        objectWillChange.send()
     }
 }
 
