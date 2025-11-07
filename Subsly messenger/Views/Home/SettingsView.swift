@@ -7,6 +7,7 @@ struct SettingsView: View {
     @EnvironmentObject private var usersStore: UsersStore
 
     let currentUser: AppUser
+    private let onBackToChats: (() -> Void)?
 
     @State private var workingUser: AppUser
     @State private var pickerItem: PhotosPickerItem?
@@ -16,8 +17,9 @@ struct SettingsView: View {
     @State private var statusIsError = false
     @State private var bioText: String
 
-    init(currentUser: AppUser) {
+    init(currentUser: AppUser, onBackToChats: (() -> Void)? = nil) {
         self.currentUser = currentUser
+        self.onBackToChats = onBackToChats
         _workingUser = State(initialValue: currentUser)
         _bioText = State(initialValue: currentUser.bio ?? "")
     }
@@ -31,6 +33,22 @@ struct SettingsView: View {
             }
             .listStyle(.insetGrouped)
             .navigationTitle("Settings")
+            .toolbar {
+                if let onBackToChats {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            onBackToChats()
+                        } label: {
+                            HStack(spacing: 4) {
+                                Image(systemName: "chevron.backward")
+                                Text("Chats")
+                            }
+                        }
+                        .accessibilityLabel("Back to Chats")
+                    }
+                }
+            }
         }
         .onChange(of: session.currentUser) { _, newValue in
             if let updated = newValue {
