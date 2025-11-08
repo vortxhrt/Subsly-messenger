@@ -17,6 +17,8 @@ struct ThreadView: View {
 
     @State private var threadId: String?
     @State private var messages: [MessageModel] = []
+    @State private var serverMessages: [MessageModel] = []
+    @State private var pendingLocalMessages: [MessageModel] = []
     @State private var inputText: String = ""
 
     @State private var listener: ListenerRegistration?
@@ -97,6 +99,7 @@ struct ThreadView: View {
                                 isMe: msg.senderId == myId,
                                 createdAt: msg.createdAt,
                                 replyTo: enrichedReplyPreview(for: msg),
+                                isSending: pendingOutgoingIDs.contains(msg.id),
                                 isExpanded: expandedMessageIDs.contains(msg.id),
                                 status: statusForMessage(msg),
                                 onTap: { handleTap(on: msg.id) },
@@ -126,7 +129,7 @@ struct ThreadView: View {
 
                 // Keep bottom pinned and wire receipts whenever messages change.
                 .onChange(of: messages) { _, _ in
-                    hasMoreHistory = messages.count >= messageLimit
+                    hasMoreHistory = serverMessages.count >= messageLimit
                     if isLoadingMore {
                         if let restoreId = restoreScrollToId {
                             DispatchQueue.main.async {
@@ -224,6 +227,9 @@ struct ThreadView: View {
                     }
                 }
                 pendingAttachments.removeAll()
+                pendingLocalMessages.removeAll()
+                pendingOutgoingIDs.removeAll()
+                rebuildMessages()
                 attachmentTask?.cancel(); attachmentTask = nil
                 if let tid = threadId, !myId.isEmpty {
                     Task { try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false) }
@@ -270,6 +276,7 @@ struct ThreadView: View {
 
         var activeMessageIDs: Set<String> = []
         for msg in messages where msg.senderId == myId {
+            if msg.id.hasPrefix("local-") { continue }
             activeMessageIDs.insert(msg.id)
 
             if msg.deliveredTo.contains(otherUID) {
@@ -402,10 +409,10 @@ struct ThreadView: View {
 
         let replyContext = replyPreview
 
-        // Create a local outgoing message with a unique id and mark as pending.
         let localId = "local-" + UUID().uuidString
-        let local = MessageModel(
+        let localMessage = MessageModel(
             id: localId,
+            clientMessageId: localId,
             senderId: myId,
             text: trimmed,
             createdAt: Date(),
@@ -415,19 +422,20 @@ struct ThreadView: View {
             replyTo: replyContext
         )
         pendingOutgoingIDs.insert(localId)
-        messages.append(local)
+        pendingLocalMessages.append(localMessage)
+        rebuildMessages()
         inputText = ""
         let attachmentsCopy = pendingAttachments
         pendingAttachments.removeAll()
         replyPreview = nil
 
-        // Fire off the real send; when it completes, clear pending for that local id.
         Task {
             do {
                 try await ChatService.shared.sendMessage(
                     threadId: tid,
                     from: myId,
                     text: trimmed,
+                    clientMessageId: localId,
                     attachments: attachmentsCopy,
                     reply: replyContext
                 )
@@ -438,14 +446,14 @@ struct ThreadView: View {
                     }
                 }
                 print("Send message failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    self.pendingOutgoingIDs.remove(localId)
+                    self.pendingLocalMessages.removeAll { $0.id == localId }
+                    self.rebuildMessages()
+                }
             }
-            await MainActor.run {
-                pendingOutgoingIDs.remove(localId)
-            }
-            // The server snapshot will replace the local bubble.
         }
 
-        // Stop typing state
         Task {
             try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false)
         }
@@ -455,6 +463,48 @@ struct ThreadView: View {
     private func purgeStalePendingIDs() {
         let present = Set(messages.map { $0.id })
         pendingOutgoingIDs = pendingOutgoingIDs.intersection(present)
+    }
+
+    private func rebuildMessages() {
+        var combined = serverMessages
+        if !pendingLocalMessages.isEmpty {
+            let sortedPending = pendingLocalMessages.sorted { (lhs, rhs) -> Bool in
+                let lhsDate = lhs.createdAt ?? Date()
+                let rhsDate = rhs.createdAt ?? Date()
+                if abs(lhsDate.timeIntervalSince(rhsDate)) < 0.000_1 {
+                    return lhs.id < rhs.id
+                }
+                return lhsDate < rhsDate
+            }
+            combined.append(contentsOf: sortedPending)
+        }
+        messages = combined
+    }
+
+    private func removeSatisfiedPending(using server: [MessageModel]) {
+        guard !pendingLocalMessages.isEmpty else { return }
+        let satisfied = Set(server.compactMap { $0.clientMessageId })
+        guard !satisfied.isEmpty else { return }
+
+        var remaining: [MessageModel] = []
+        var removedIds: Set<String> = []
+
+        for local in pendingLocalMessages {
+            if let clientId = local.clientMessageId, satisfied.contains(clientId) {
+                removedIds.insert(local.id)
+            } else {
+                remaining.append(local)
+            }
+        }
+
+        if !removedIds.isEmpty {
+            pendingLocalMessages = remaining
+            pendingOutgoingIDs.subtract(removedIds)
+            removedIds.forEach { id in
+                expandedMessageIDs.remove(id)
+                expandTokens[id] = nil
+            }
+        }
     }
 
     private func removePendingAttachment(_ attachment: PendingAttachment) {
@@ -686,7 +736,10 @@ struct ThreadView: View {
         listener?.remove()
         listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
-                self.messages = filteredMessages(list, threadId: threadId)
+                let filtered = self.filteredMessages(list, threadId: threadId)
+                self.serverMessages = filtered
+                self.removeSatisfiedPending(using: filtered)
+                self.rebuildMessages()
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif

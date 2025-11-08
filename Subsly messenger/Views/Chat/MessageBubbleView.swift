@@ -14,6 +14,7 @@ struct MessageBubbleView: View {
     let isMe: Bool
     let createdAt: Date?
     let replyTo: MessageModel.ReplyPreview?
+    let isSending: Bool
     let isExpanded: Bool
     let status: DeliveryState?       // only used for outgoing (isMe == true)
     let onTap: () -> Void
@@ -49,14 +50,16 @@ struct MessageBubbleView: View {
                     ForEach(Array(media.enumerated()), id: \.offset) { _, item in
                         HStack(spacing: 0) {
                             if isMe { Spacer(minLength: 0) }
-                            MediaAttachmentView(media: item)
+                            MediaAttachmentView(media: item, isPending: isMe && isSending)
                                 .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
                                 .padding(.leading, isMe ? 0 : edgeInset)
                                 .padding(.trailing, isMe ? edgeInset : 0)
                                 .onTapGesture {
+                                    guard !(isMe && isSending) else { return }
                                     onAttachmentTap(item)
                                     onTap()
                                 }
+                                .allowsHitTesting(!(isMe && isSending))
                             if !isMe { Spacer(minLength: 0) }
                         }
                     }
@@ -248,6 +251,7 @@ struct MessageBubbleView: View {
 
 private struct MediaAttachmentView: View {
     let media: MessageModel.Media
+    let isPending: Bool
 
     private var displaySize: CGSize {
         let maxDimension: CGFloat = 250
@@ -289,37 +293,23 @@ private struct MediaAttachmentView: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            Group {
-                if let data = imageData, let uiImage = UIImage(data: data) {
-                    Image(uiImage: uiImage)
-                        .resizable()
-                        .scaledToFill()
-                } else if let url = imageURL {
-                    AsyncImage(url: url) { phase in
-                        switch phase {
-                        case .success(let image):
-                            image
-                                .resizable()
-                                .scaledToFill()
-                        case .failure:
-                            placeholder
-                        case .empty:
-                            placeholder
-                        @unknown default:
-                            placeholder
-                        }
-                    }
-                } else {
-                    placeholder
-                }
-            }
-            .frame(width: displaySize.width, height: displaySize.height)
-            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .overlay(
+        ZStack {
+            attachmentSurface
+
+            if isPending {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.1))
-            )
+                    .fill(Color.black.opacity(0.35))
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            }
+        }
+        .frame(width: displaySize.width, height: displaySize.height)
+    }
+
+    private var attachmentSurface: some View {
+        ZStack(alignment: .bottomTrailing) {
+            baseImage
 
             if media.kind == .video {
                 Image(systemName: "play.circle.fill")
@@ -329,6 +319,39 @@ private struct MediaAttachmentView: View {
                     .padding(10)
             }
         }
+    }
+
+    private var baseImage: some View {
+        Group {
+            if let data = imageData, let uiImage = UIImage(data: data) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+            } else if let url = imageURL {
+                AsyncImage(url: url) { phase in
+                    switch phase {
+                    case .success(let image):
+                        image
+                            .resizable()
+                            .scaledToFill()
+                    case .failure:
+                        placeholder
+                    case .empty:
+                        placeholder
+                    @unknown default:
+                        placeholder
+                    }
+                }
+            } else {
+                placeholder
+            }
+        }
+        .frame(width: displaySize.width, height: displaySize.height)
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.1))
+        )
     }
 
     private var placeholder: some View {

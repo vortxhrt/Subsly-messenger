@@ -42,6 +42,7 @@ actor ChatService {
     func sendMessage(threadId: String,
                      from senderId: String,
                      text: String,
+                     clientMessageId: String,
                      attachments: [PendingAttachment] = [],
                      reply: MessageModel.ReplyPreview? = nil) async throws {
         guard let threadsCol = await threadsCollection() else {
@@ -52,6 +53,7 @@ actor ChatService {
         var payload: [String: Any] = [
             "senderId": senderId,
             "text": text,
+            "clientMessageId": clientMessageId,
             "createdAt": FieldValue.serverTimestamp()
         ]
 
@@ -176,6 +178,7 @@ actor ChatService {
                 let read = data["readBy"] as? [String] ?? []
                 return MessageModel(
                     id: doc.documentID,
+                    clientMessageId: data["clientMessageId"] as? String,
                     senderId: data["senderId"] as? String ?? "",
                     text: text,
                     createdAt: ts,

@@ -60,6 +60,7 @@ struct MessageModel: Identifiable, Hashable {
     }
 
     let id: String          // non-optional so ForEach never sees an optional
+    let clientMessageId: String?
     let senderId: String
     let text: String
     let createdAt: Date?
