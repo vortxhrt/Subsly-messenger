@@ -49,6 +49,8 @@ struct ThreadView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var showingProfile = false
 
+    @State private var composerHeight: CGFloat = 80
+
     @State private var replyPreview: MessageModel.ReplyPreview?
 
     @State private var pendingAttachments: [PendingAttachment] = []
@@ -58,7 +60,9 @@ struct ThreadView: View {
     @State private var showingAttachmentError = false
     @State private var mediaViewer: MediaViewerPayload?
 
-    private let bottomContentPadding: CGFloat = 80
+    private var bottomContentPadding: CGFloat {
+        composerHeight + 24
+    }
 
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
@@ -129,38 +133,16 @@ struct ThreadView: View {
                 .background(Color(.systemGroupedBackground))
 
                 // Keep bottom pinned and wire receipts whenever messages change.
-                .onChange(of: messages) { _, _ in
-                    hasMoreHistory = serverMessages.count >= messageLimit
-                    if isLoadingMore {
-                        if let restoreId = restoreScrollToId {
-                            DispatchQueue.main.async {
-                                proxy.scrollTo(restoreId, anchor: .top)
-                            }
-                        }
-                        restoreScrollToId = nil
-                        isLoadingMore = false
-                    } else {
-                        if messages.isEmpty {
-                            // Nothing to scroll yet
-                        } else if hasPerformedInitialScroll {
-                            scrollToBottom(proxy: proxy, animated: true)
-                        } else {
-                            DispatchQueue.main.async {
-                                scrollToBottom(proxy: proxy, animated: false)
-                                hasPerformedInitialScroll = true
-                            }
-                        }
-                    }
-                    // Wire up receipts + mark my receipts for incoming
-                    setupReceiptsIfNeeded()
-                    markIncomingAsDelivered()
-                    markIncomingAsRead()
-                    // Clear pending IDs that no longer exist (server confirmed / replaced)
-                    purgeStalePendingIDs()
+                .onChange(of: messages) { _, newMessages in
+                    handleMessagesChange(newMessages, proxy: proxy)
                 }
                 .onChange(of: isOtherTyping) { _, _ in
                     guard !isLoadingMore else { return }
-                    scrollToBottom(proxy: proxy, animated: true)
+                    scheduleBottomScroll(proxy: proxy, animated: true)
+                }
+                .onChange(of: composerHeight) { _, _ in
+                    guard hasPerformedInitialScroll else { return }
+                    scheduleBottomScroll(proxy: proxy, animated: false)
                 }
             }
             .navigationTitle("")
@@ -205,6 +187,7 @@ struct ThreadView: View {
                     )
                 }
                 .background(.ultraThinMaterial)
+                .background(ComposerHeightReader())
             }
 
             .task { await openThreadIfNeeded() }
@@ -246,6 +229,12 @@ struct ThreadView: View {
             }
             .fullScreenCover(item: $mediaViewer) { payload in
                 MediaViewerView(media: payload.media)
+            }
+        }
+        .onPreferenceChange(ComposerHeightPreferenceKey.self) { newValue in
+            let clamped = max(newValue, 44)
+            if abs(composerHeight - clamped) > 0.5 {
+                composerHeight = clamped
             }
         }
     }
@@ -508,6 +497,47 @@ struct ThreadView: View {
         }
     }
 
+    private func handleMessagesChange(_ newMessages: [MessageModel], proxy: ScrollViewProxy) {
+        hasMoreHistory = serverMessages.count >= messageLimit
+
+        if isLoadingMore {
+            if let restoreId = restoreScrollToId {
+                DispatchQueue.main.async {
+                    proxy.scrollTo(restoreId, anchor: .top)
+                }
+            }
+            restoreScrollToId = nil
+            isLoadingMore = false
+        } else if !newMessages.isEmpty {
+            let alreadyScrolled = hasPerformedInitialScroll
+            let shouldAnimate = alreadyScrolled
+            scheduleBottomScroll(proxy: proxy, animated: shouldAnimate)
+            if !alreadyScrolled {
+                hasPerformedInitialScroll = true
+            }
+        }
+
+        let requiresFollowUpScroll = shouldForceBottomScroll(for: newMessages)
+        if requiresFollowUpScroll {
+            scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.2)
+            scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.45)
+        }
+
+        setupReceiptsIfNeeded()
+        markIncomingAsDelivered()
+        markIncomingAsRead()
+        purgeStalePendingIDs()
+    }
+
+    private func shouldForceBottomScroll(for messages: [MessageModel]) -> Bool {
+        guard !messages.isEmpty else { return false }
+        guard !isLoadingMore else { return false }
+        guard hasPerformedInitialScroll else { return true }
+
+        let trailingSample = messages.suffix(5)
+        return trailingSample.contains(where: { !$0.media.isEmpty })
+    }
+
     private func prefetchMediaForLatestMessages() {
         guard !serverMessages.isEmpty else { return }
         let latest = serverMessages.suffix(prefetchMediaLimit)
@@ -724,8 +754,9 @@ struct ThreadView: View {
     private func generateThumbnail(for asset: AVAsset) throws -> UIImage {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        let durationSeconds = CMTimeGetSeconds(asset.duration)
-        let captureTime = CMTime(seconds: min(max(durationSeconds / 3.0, 0.1), 1.0), preferredTimescale: 600)
+        let durationSeconds = max(CMTimeGetSeconds(asset.duration), 0.1)
+        let captureSeconds = min(max(durationSeconds / 3.0, 0.1), durationSeconds)
+        let captureTime = CMTime(seconds: captureSeconds, preferredTimescale: 600)
         let cgImage = try generator.copyCGImage(at: captureTime, actualTime: nil)
         return UIImage(cgImage: cgImage)
     }
@@ -809,6 +840,18 @@ struct ThreadView: View {
             }
         } else {
             proxy.scrollTo(targetId, anchor: .bottom)
+        }
+    }
+
+    private func scheduleBottomScroll(proxy: ScrollViewProxy, animated: Bool, delay: Double? = nil) {
+        let work = {
+            scrollToBottom(proxy: proxy, animated: animated)
+        }
+
+        if let delay, delay > 0 {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        } else {
+            DispatchQueue.main.async(execute: work)
         }
     }
 
@@ -907,31 +950,10 @@ private struct MediaViewerView: View {
     private var content: some View {
         switch media.kind {
         case .image:
-            if let image = resolvedImage() {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if let url = resolvedImageURL() {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFit()
-                    case .empty:
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                    case .failure:
-                        placeholder
-                    @unknown default:
-                        placeholder
-                    }
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else {
-                placeholder
-            }
+            ZoomableImageContainer(
+                localImage: resolvedImage(),
+                remoteURL: resolvedImageURL()
+            )
 
         case .video:
             if let url = resolvedVideoURL() {
@@ -990,6 +1012,237 @@ private struct MediaViewerView: View {
             Text("Loading media…")
                 .foregroundColor(.white.opacity(0.7))
                 .font(.callout)
+        }
+    }
+}
+
+private struct ZoomableImageContainer: View {
+    let localImage: UIImage?
+    let remoteURL: URL?
+
+    @State private var remoteImage: UIImage?
+    @State private var isLoading = false
+    @State private var loadFailed = false
+
+    var body: some View {
+        Group {
+            if let image = localImage ?? remoteImage {
+                ZoomableImageView(image: image)
+            } else if loadFailed {
+                errorView
+            } else {
+                loadingView
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .task(id: remoteURL) {
+            guard remoteImage == nil, localImage == nil, let url = remoteURL else { return }
+            await loadRemoteImage(url)
+        }
+    }
+
+    private func loadRemoteImage(_ url: URL) async {
+        await MainActor.run {
+            isLoading = true
+            loadFailed = false
+        }
+        do {
+            let data = try await MediaCache.shared.data(for: url)
+            if Task.isCancelled { return }
+            if let image = UIImage(data: data) {
+                await MainActor.run {
+                    remoteImage = image
+                    isLoading = false
+                    loadFailed = false
+                }
+            } else {
+                await MainActor.run {
+                    isLoading = false
+                    loadFailed = true
+                }
+            }
+        } catch {
+            if Task.isCancelled { return }
+            await MainActor.run {
+                isLoading = false
+                loadFailed = true
+            }
+        }
+    }
+
+    private var loadingView: some View {
+        VStack(spacing: 16) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.white)
+            Text(isLoading ? "Loading image…" : "Preparing image…")
+                .foregroundColor(.white.opacity(0.7))
+                .font(.callout)
+        }
+    }
+
+    private var errorView: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundColor(.white)
+            Text("Image failed to load")
+                .foregroundColor(.white.opacity(0.7))
+                .font(.callout)
+        }
+    }
+}
+
+private struct ZoomableImageView: View {
+    let image: UIImage
+
+    @State private var scale: CGFloat = 1
+    @State private var lastScale: CGFloat = 1
+    @State private var offset: CGSize = .zero
+    @State private var lastOffset: CGSize = .zero
+
+    var body: some View {
+        GeometryReader { proxy in
+            let size = proxy.size
+            Image(uiImage: image)
+                .resizable()
+                .scaledToFit()
+                .scaleEffect(scale)
+                .offset(offset)
+                .frame(width: size.width, height: size.height)
+                .contentShape(Rectangle())
+                .gesture(dragGesture(containerSize: size))
+                .simultaneousGesture(magnificationGesture(containerSize: size))
+                .onTapGesture(count: 2) {
+                    toggleZoom(containerSize: size)
+                }
+                .animation(.easeOut(duration: 0.2), value: scale)
+        }
+        .clipped()
+    }
+
+    private func magnificationGesture(containerSize: CGSize) -> some Gesture {
+        MagnificationGesture()
+            .onChanged { value in
+                let delta = value / lastScale
+                var newScale = scale * delta
+                newScale = min(max(newScale, 1), 4)
+                scale = newScale
+                lastScale = value
+                clampOffset(in: containerSize, animated: false)
+            }
+            .onEnded { _ in
+                lastScale = 1
+                if scale <= 1.01 {
+                    withAnimation(.easeOut(duration: 0.2)) {
+                        scale = 1
+                        offset = .zero
+                        lastOffset = .zero
+                    }
+                } else {
+                    clampOffset(in: containerSize, animated: true)
+                }
+            }
+    }
+
+    private func dragGesture(containerSize: CGSize) -> some Gesture {
+        DragGesture()
+            .onChanged { value in
+                guard scale > 1 else { return }
+                let translation = value.translation
+                offset = CGSize(
+                    width: lastOffset.width + translation.width,
+                    height: lastOffset.height + translation.height
+                )
+            }
+            .onEnded { _ in
+                guard scale > 1 else { return }
+                lastOffset = offset
+                clampOffset(in: containerSize, animated: true)
+            }
+    }
+
+    private func toggleZoom(containerSize: CGSize) {
+        if scale > 1.01 {
+            withAnimation(.easeOut(duration: 0.2)) {
+                scale = 1
+                offset = .zero
+                lastOffset = .zero
+            }
+        } else {
+            withAnimation(.easeOut(duration: 0.2)) {
+                scale = 2
+                offset = .zero
+                lastOffset = .zero
+            }
+            clampOffset(in: containerSize, animated: true)
+        }
+    }
+
+    private func clampOffset(in containerSize: CGSize, animated: Bool) {
+        guard scale > 1 else {
+            let update = {
+                offset = .zero
+                lastOffset = .zero
+            }
+            if animated {
+                withAnimation(.easeOut(duration: 0.2), update)
+            } else {
+                update()
+            }
+            return
+        }
+
+        let fitted = fittedSize(in: containerSize)
+        let scaledWidth = fitted.width * scale
+        let scaledHeight = fitted.height * scale
+
+        let horizontalLimit = max((scaledWidth - containerSize.width) / 2, 0)
+        let verticalLimit = max((scaledHeight - containerSize.height) / 2, 0)
+
+        let clampedX = min(max(offset.width, -horizontalLimit), horizontalLimit)
+        let clampedY = min(max(offset.height, -verticalLimit), verticalLimit)
+
+        let update = {
+            offset = CGSize(width: clampedX, height: clampedY)
+            lastOffset = offset
+        }
+
+        if animated {
+            withAnimation(.easeOut(duration: 0.2), update)
+        } else {
+            update()
+        }
+    }
+
+    private func fittedSize(in containerSize: CGSize) -> CGSize {
+        let imageSize = image.size
+        guard imageSize.width > 0, imageSize.height > 0 else {
+            return containerSize
+        }
+        let aspect = imageSize.width / imageSize.height
+        var width = containerSize.width
+        var height = width / aspect
+        if height > containerSize.height {
+            height = containerSize.height
+            width = height * aspect
+        }
+        return CGSize(width: width, height: height)
+    }
+}
+
+private struct ComposerHeightPreferenceKey: PreferenceKey {
+    static var defaultValue: CGFloat = 80
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct ComposerHeightReader: View {
+    var body: some View {
+        GeometryReader { geo in
+            Color.clear.preference(key: ComposerHeightPreferenceKey.self, value: geo.size.height)
         }
     }
 }
