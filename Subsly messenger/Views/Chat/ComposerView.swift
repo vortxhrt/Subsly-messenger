@@ -28,7 +28,9 @@ struct ComposerView: View {
     @State private var pickerItems: [PhotosPickerItem] = []
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
+
+            // --- Attachments area (unchanged UI, just tidy paddings) ---
             if !attachments.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(attachments) { attachment in
@@ -66,7 +68,10 @@ struct ComposerView: View {
                 .padding(.horizontal, sideGap)
             }
 
+            // --- Composer row ---
             HStack(spacing: 8) {
+
+                // Attachments button
                 PhotosPicker(selection: $pickerItems,
                              maxSelectionCount: attachmentLimit,
                              matching: .any(of: [.images, .videos])) {
@@ -87,20 +92,30 @@ struct ComposerView: View {
                     pickerItems = []
                 }
 
-                VStack(alignment: .leading, spacing: 4) {
+                // --- Input bubble (WhatsApp-style) ---
+                VStack(alignment: .leading, spacing: 0) {
+
+                    // Inline reply preview INSIDE the pill (compact, no own background)
                     if let replyPreview {
-                        ReplyComposerPreview(preview: replyPreview, onCancel: onCancelReply)
-                            .transition(.move(edge: .bottom).combined(with: .opacity))
+                        ReplyInlinePreview(preview: replyPreview, onCancel: onCancelReply)
+                            .padding(.top, 6)
+                            .padding(.horizontal, 2)
+
+                        // Thin divider like WhatsApp between preview and field
+                        Divider()
+                            .opacity(0.12)
+                            .padding(.horizontal, -innerH) // extend to pill edges
+                            .padding(.vertical, 4)
                     }
 
+                    // Multiline text field
                     TextField("Message...", text: $text, axis: .vertical)
                         .textFieldStyle(.plain)
                         .lineLimit(1...maxLines)
                         .textInputAutocapitalization(.sentences)
                         .disableAutocorrection(false)
                         .focused($isFocused)
-                        .padding(.vertical, 4)
-                        // typing signal with debounce
+                        .padding(.vertical, 6) // tight vertical like WhatsApp
                         .onChange(of: text) { _, newValue in
                             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                             onTyping(!trimmed.isEmpty)
@@ -113,13 +128,15 @@ struct ComposerView: View {
                             }
                         }
                 }
-                .padding(.vertical, innerV)
                 .padding(.horizontal, innerH)
+                // Slightly reduce vertical padding when we have a reply chip so the pill stays compact
+                .padding(.vertical, replyPreview == nil ? innerV : 6)
                 .background(
                     RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
                         .fill(Color(.secondarySystemFill))
                 )
 
+                // Send
                 Button(action: sendTapped) {
                     Image(systemName: "paperplane.fill")
                         .font(.system(size: 16, weight: .semibold))
@@ -137,9 +154,8 @@ struct ComposerView: View {
                 .opacity(canSend ? 1.0 : 0.4)
                 .accessibilityLabel("Send")
             }
-            // Only the composer content gets the side gap; nothing else moves
             .padding(.horizontal, sideGap)
-            .padding(.vertical, 8)
+            .padding(.vertical, 6)
         }
     }
 
@@ -150,6 +166,8 @@ struct ComposerView: View {
         isFocused = true   // keep keyboard up for fast sends
     }
 }
+
+// MARK: - Attachment Preview (unchanged)
 
 private struct AttachmentPreviewView: View {
     let attachment: PendingAttachment
@@ -218,67 +236,65 @@ private struct AttachmentPreviewView: View {
     }
 }
 
-private struct ReplyComposerPreview: View {
+// MARK: - Compact inline reply chip (WhatsApp-style)
+
+private struct ReplyInlinePreview: View {
     let preview: MessageModel.ReplyPreview
     let onCancel: () -> Void
+
+    @Environment(\.colorScheme) private var colorScheme
 
     private var iconName: String? {
         guard preview.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true else {
             return nil
         }
         switch preview.mediaKind {
-        case .some(.image):
-            return "photo"
-        case .some(.video):
-            return "video"
-        default:
-            return nil
+        case .some(.image): return "photo"
+        case .some(.video): return "video"
+        default: return nil
         }
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            RoundedRectangle(cornerRadius: 2, style: .continuous)
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            // tiny colored bar like WhatsApp
+            RoundedRectangle(cornerRadius: 1.5, style: .continuous)
                 .fill(Color.accentColor)
-                .frame(width: 3)
+                .frame(width: 2, height: 18)
 
-            VStack(alignment: .leading, spacing: 4) {
+            VStack(alignment: .leading, spacing: 1) {
                 Text(preview.displayName)
-                    .font(.caption)
+                    .font(.caption2)
                     .fontWeight(.semibold)
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(Color.accentColor)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
 
-                if let iconName {
-                    Label(preview.summary, systemImage: iconName)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .labelStyle(.titleAndIcon)
-                        .lineLimit(2)
-                } else {
+                HStack(spacing: 4) {
+                    if let iconName {
+                        Image(systemName: iconName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                    }
                     Text(preview.summary)
-                        .font(.subheadline)
-                        .foregroundStyle(.primary)
-                        .lineLimit(2)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 6)
 
             Button(action: onCancel) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 18, weight: .semibold))
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
                     .foregroundStyle(.secondary)
+                    .padding(4)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel reply")
         }
-        .padding(.vertical, 3)
-        .padding(.horizontal, 10)
-        .background(
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(.tertiarySystemFill))
-        )
-        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
