@@ -49,8 +49,6 @@ struct ThreadView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var showingProfile = false
 
-    @State private var composerHeight: CGFloat = 80
-
     @State private var replyPreview: MessageModel.ReplyPreview?
 
     @State private var pendingAttachments: [PendingAttachment] = []
@@ -60,9 +58,7 @@ struct ThreadView: View {
     @State private var showingAttachmentError = false
     @State private var mediaViewer: MediaViewerPayload?
 
-    private var bottomContentPadding: CGFloat {
-        composerHeight + 24
-    }
+    @State private var composerHeight: CGFloat = 72
 
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
@@ -98,26 +94,35 @@ struct ThreadView: View {
                         }
 
                         ForEach(messages, id: \.id) { msg in
-                            MessageBubbleView(
-                                text: msg.text,
-                                media: msg.media,
-                                isMe: msg.senderId == myId,
-                                createdAt: msg.createdAt,
-                                replyTo: enrichedReplyPreview(for: msg),
-                                isSending: pendingOutgoingIDs.contains(msg.id),
-                                isExpanded: expandedMessageIDs.contains(msg.id),
-                                status: statusForMessage(msg),
-                                onTap: { handleTap(on: msg.id) },
-                                onAttachmentTap: { media in
-                                    mediaViewer = MediaViewerPayload(media: media)
-                                },
-                                onReply: { startReply(with: msg) },
-                                onReplyPreviewTap: {
-                                    if let replyId = msg.replyTo?.messageId {
-                                        scrollToMessage(withId: replyId, proxy: proxy)
+                            let isMe = msg.senderId == myId
+                            let metadata = senderMetadata(for: msg)
+
+                            MessageRowView(
+                                isMe: isMe,
+                                avatarURL: metadata.avatarURL,
+                                avatarLabel: metadata.displayName
+                            ) {
+                                MessageBubbleView(
+                                    text: msg.text,
+                                    media: msg.media,
+                                    isMe: isMe,
+                                    createdAt: msg.createdAt,
+                                    replyTo: enrichedReplyPreview(for: msg),
+                                    isSending: pendingOutgoingIDs.contains(msg.id),
+                                    isExpanded: expandedMessageIDs.contains(msg.id),
+                                    status: statusForMessage(msg),
+                                    onTap: { handleTap(on: msg.id) },
+                                    onAttachmentTap: { media in
+                                        mediaViewer = MediaViewerPayload(media: media)
+                                    },
+                                    onReply: { startReply(with: msg) },
+                                    onReplyPreviewTap: {
+                                        if let replyId = msg.replyTo?.messageId {
+                                            scrollToMessage(withId: replyId, proxy: proxy)
+                                        }
                                     }
-                                }
-                            )
+                                )
+                            }
                         }
 
                         if isOtherTyping {
@@ -127,7 +132,7 @@ struct ThreadView: View {
                         Color.clear.frame(height: 1).id("BOTTOM_ANCHOR")
                     }
                     .padding(.top, 8)
-                    .padding(.bottom, bottomContentPadding)
+                    .padding(.bottom, 12)
                 }
                 .scrollIndicators(.hidden)
                 .background(Color(.systemGroupedBackground))
@@ -193,6 +198,7 @@ struct ThreadView: View {
             .task { await openThreadIfNeeded() }
             .task { await usersStore.ensure(uid: otherUID) }
             .onAppear {
+                scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.05)
                 // Defensive first pass (in case messages already present)
                 setupReceiptsIfNeeded()
                 markIncomingAsDelivered()
@@ -232,7 +238,7 @@ struct ThreadView: View {
             }
         }
         .onPreferenceChange(ComposerHeightPreferenceKey.self) { newValue in
-            let clamped = max(newValue, 44)
+            let clamped = max(newValue, 52)
             if abs(composerHeight - clamped) > 0.5 {
                 composerHeight = clamped
             }
@@ -509,33 +515,20 @@ struct ThreadView: View {
             restoreScrollToId = nil
             isLoadingMore = false
         } else if !newMessages.isEmpty {
-            let alreadyScrolled = hasPerformedInitialScroll
-            let shouldAnimate = alreadyScrolled
-            scheduleBottomScroll(proxy: proxy, animated: shouldAnimate)
-            if !alreadyScrolled {
+            if hasPerformedInitialScroll {
+                scheduleBottomScroll(proxy: proxy, animated: true)
+            } else {
+                scheduleBottomScroll(proxy: proxy, animated: false)
+                scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.08)
+                scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.18)
                 hasPerformedInitialScroll = true
             }
-        }
-
-        let requiresFollowUpScroll = shouldForceBottomScroll(for: newMessages)
-        if requiresFollowUpScroll {
-            scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.2)
-            scheduleBottomScroll(proxy: proxy, animated: false, delay: 0.45)
         }
 
         setupReceiptsIfNeeded()
         markIncomingAsDelivered()
         markIncomingAsRead()
         purgeStalePendingIDs()
-    }
-
-    private func shouldForceBottomScroll(for messages: [MessageModel]) -> Bool {
-        guard !messages.isEmpty else { return false }
-        guard !isLoadingMore else { return false }
-        guard hasPerformedInitialScroll else { return true }
-
-        let trailingSample = messages.suffix(5)
-        return trailingSample.contains(where: { !$0.media.isEmpty })
     }
 
     private func prefetchMediaForLatestMessages() {
@@ -843,12 +836,12 @@ struct ThreadView: View {
         }
     }
 
-    private func scheduleBottomScroll(proxy: ScrollViewProxy, animated: Bool, delay: Double? = nil) {
+    private func scheduleBottomScroll(proxy: ScrollViewProxy, animated: Bool, delay: Double = 0) {
         let work = {
             scrollToBottom(proxy: proxy, animated: animated)
         }
 
-        if let delay, delay > 0 {
+        if delay > 0 {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
         } else {
             DispatchQueue.main.async(execute: work)
@@ -888,6 +881,24 @@ struct ThreadView: View {
         return "User \(otherUID.prefix(6))"
     }
 
+    private func senderMetadata(for message: MessageModel) -> (avatarURL: String?, displayName: String) {
+        let senderId = message.senderId
+
+        if senderId == myId {
+            let name = resolvedDisplayName(for: myId)
+            return (currentUser.avatarURL, name)
+        }
+
+        if let cached = usersStore.user(for: senderId) {
+            let name = cached.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            let preferred = name.isEmpty ? cached.handle : name
+            return (cached.avatarURL, preferred)
+        }
+
+        let fallback = resolvedDisplayName(for: senderId)
+        return (nil, fallback)
+    }
+
     private var profileHeader: some View {
         Button(action: { showingProfile = true }) {
             HStack(spacing: 12) {
@@ -916,6 +927,43 @@ struct ThreadView: View {
 private struct MediaViewerPayload: Identifiable {
     let id = UUID()
     let media: MessageModel.Media
+}
+
+private struct MessageRowView<Content: View>: View {
+    let isMe: Bool
+    let avatarURL: String?
+    let avatarLabel: String
+    private let content: () -> Content
+
+    private let avatarSize: CGFloat = 28
+    private let horizontalInset: CGFloat = 8
+
+    init(isMe: Bool,
+         avatarURL: String?,
+         avatarLabel: String,
+         @ViewBuilder content: @escaping () -> Content) {
+        self.isMe = isMe
+        self.avatarURL = avatarURL
+        self.avatarLabel = avatarLabel
+        self.content = content
+    }
+
+    var body: some View {
+        HStack(alignment: .bottom, spacing: 8) {
+            if isMe {
+                Spacer(minLength: 0)
+                content()
+                    .frame(maxWidth: .infinity, alignment: .trailing)
+            } else {
+                AvatarView(avatarURL: avatarURL, name: avatarLabel, size: avatarSize)
+                    .accessibilityLabel(avatarLabel)
+                content()
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, horizontalInset)
+    }
 }
 
 private struct MediaViewerView: View {
@@ -1232,7 +1280,7 @@ private struct ZoomableImageView: View {
 }
 
 private struct ComposerHeightPreferenceKey: PreferenceKey {
-    static var defaultValue: CGFloat = 80
+    static var defaultValue: CGFloat = 72
 
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = nextValue()
@@ -1241,8 +1289,9 @@ private struct ComposerHeightPreferenceKey: PreferenceKey {
 
 private struct ComposerHeightReader: View {
     var body: some View {
-        GeometryReader { geo in
-            Color.clear.preference(key: ComposerHeightPreferenceKey.self, value: geo.size.height)
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: ComposerHeightPreferenceKey.self, value: proxy.size.height)
         }
     }
 }

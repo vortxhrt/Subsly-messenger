@@ -29,11 +29,6 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if let replyPreview {
-                ReplyComposerPreview(preview: replyPreview, onCancel: onCancelReply)
-                    .padding(.horizontal, sideGap)
-            }
-
             if !attachments.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
                     ForEach(attachments) { attachment in
@@ -92,31 +87,38 @@ struct ComposerView: View {
                     pickerItems = []
                 }
 
-                TextField("Message...", text: $text, axis: .vertical)
-                    .textFieldStyle(.plain)
-                    .lineLimit(1...maxLines)
-                    .textInputAutocapitalization(.sentences)
-                    .disableAutocorrection(false)
-                    .focused($isFocused)
-                    // inner padding prevents any corner clipping
-                    .padding(.vertical, innerV)
-                    .padding(.horizontal, innerH)
-                    .background(
-                        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-                            .fill(Color(.secondarySystemFill))
-                    )
-                    // typing signal with debounce
-                    .onChange(of: text) { _, newValue in
-                        let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
-                        onTyping(!trimmed.isEmpty)
-
-                        typingDebounceTask?.cancel()
-                        typingDebounceTask = Task {
-                            try? await Task.sleep(nanoseconds: 1_200_000_000) // ~1.2s idle
-                            if Task.isCancelled { return }
-                            onTyping(false)
-                        }
+                VStack(alignment: .leading, spacing: 4) {
+                    if let replyPreview {
+                        ReplyComposerPreview(preview: replyPreview, onCancel: onCancelReply)
+                            .transition(.move(edge: .bottom).combined(with: .opacity))
                     }
+
+                    TextField("Message...", text: $text, axis: .vertical)
+                        .textFieldStyle(.plain)
+                        .lineLimit(1...maxLines)
+                        .textInputAutocapitalization(.sentences)
+                        .disableAutocorrection(false)
+                        .focused($isFocused)
+                        .padding(.vertical, 4)
+                        // typing signal with debounce
+                        .onChange(of: text) { _, newValue in
+                            let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
+                            onTyping(!trimmed.isEmpty)
+
+                            typingDebounceTask?.cancel()
+                            typingDebounceTask = Task {
+                                try? await Task.sleep(nanoseconds: 1_200_000_000) // ~1.2s idle
+                                if Task.isCancelled { return }
+                                onTyping(false)
+                            }
+                        }
+                }
+                .padding(.vertical, innerV)
+                .padding(.horizontal, innerH)
+                .background(
+                    RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                        .fill(Color(.secondarySystemFill))
+                )
 
                 Button(action: sendTapped) {
                     Image(systemName: "paperplane.fill")
@@ -207,7 +209,7 @@ private struct AttachmentPreviewView: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Remove attachment")
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 4)
         .padding(.horizontal, 10)
         .background(
             RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -235,7 +237,7 @@ private struct ReplyComposerPreview: View {
     }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
+        HStack(alignment: .top, spacing: 8) {
             RoundedRectangle(cornerRadius: 2, style: .continuous)
                 .fill(Color.accentColor)
                 .frame(width: 3)
@@ -270,12 +272,13 @@ private struct ReplyComposerPreview: View {
             .buttonStyle(.plain)
             .accessibilityLabel("Cancel reply")
         }
-        .padding(.vertical, 8)
-        .padding(.horizontal, 12)
+        .padding(.vertical, 3)
+        .padding(.horizontal, 10)
         .background(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .fill(Color(.secondarySystemFill))
+                .fill(Color(.tertiarySystemFill))
         )
         .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
