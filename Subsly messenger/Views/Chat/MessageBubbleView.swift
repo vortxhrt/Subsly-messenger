@@ -19,6 +19,7 @@ struct MessageBubbleView: View {
     let onTap: () -> Void
     var onAttachmentTap: (MessageModel.Media) -> Void = { _ in }
     var onReply: () -> Void = {}
+    var onReplyPreviewTap: () -> Void = {}
 
     // Small margin from the screen edge (messages only)
     private let edgeInset: CGFloat = 10
@@ -143,6 +144,8 @@ struct MessageBubbleView: View {
                 .fill(isMe ? Color.white.opacity(0.18) : Color(.tertiarySystemFill))
         )
         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture(perform: onReplyPreviewTap)
     }
 
     private func copyText() {

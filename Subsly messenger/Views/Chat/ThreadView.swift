@@ -102,7 +102,12 @@ struct ThreadView: View {
                                 onAttachmentTap: { media in
                                     mediaViewer = MediaViewerPayload(media: media)
                                 },
-                                onReply: { startReply(with: msg) }
+                                onReply: { startReply(with: msg) },
+                                onReplyPreviewTap: {
+                                    if let replyId = msg.replyTo?.messageId {
+                                        scrollToMessage(withId: replyId, proxy: proxy)
+                                    }
+                                }
                             )
                         }
 
@@ -680,6 +685,14 @@ struct ThreadView: View {
         } else {
             proxy.scrollTo(targetId, anchor: .bottom)
         }
+    }
+
+    private func scrollToMessage(withId id: String, proxy: ScrollViewProxy) {
+        guard messages.contains(where: { $0.id == id }) else { return }
+        withAnimation(.easeInOut(duration: 0.3)) {
+            proxy.scrollTo(id, anchor: .center)
+        }
+        showTemporarily(id)
     }
 
     private var otherUser: AppUser? { usersStore.user(for: otherUID) }
