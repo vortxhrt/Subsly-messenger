@@ -253,6 +253,10 @@ private struct MediaAttachmentView: View {
     let media: MessageModel.Media
     let isPending: Bool
 
+    @State private var remoteImage: UIImage?
+    @State private var isLoadingRemote = false
+    @State private var remoteLoadFailed = false
+
     private var displaySize: CGSize {
         let maxDimension: CGFloat = 250
         guard
@@ -292,6 +296,13 @@ private struct MediaAttachmentView: View {
         return nil
     }
 
+    private var resolvedImage: UIImage? {
+        if let data = imageData, let localImage = UIImage(data: data) {
+            return localImage
+        }
+        return remoteImage
+    }
+
     var body: some View {
         ZStack {
             attachmentSurface
@@ -305,6 +316,9 @@ private struct MediaAttachmentView: View {
             }
         }
         .frame(width: displaySize.width, height: displaySize.height)
+        .task(id: imageURL) {
+            await loadRemoteImage()
+        }
     }
 
     private var attachmentSurface: some View {
@@ -323,25 +337,10 @@ private struct MediaAttachmentView: View {
 
     private var baseImage: some View {
         Group {
-            if let data = imageData, let uiImage = UIImage(data: data) {
-                Image(uiImage: uiImage)
+            if let image = resolvedImage {
+                Image(uiImage: image)
                     .resizable()
                     .scaledToFill()
-            } else if let url = imageURL {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .scaledToFill()
-                    case .failure:
-                        placeholder
-                    case .empty:
-                        placeholder
-                    @unknown default:
-                        placeholder
-                    }
-                }
             } else {
                 placeholder
             }
@@ -358,9 +357,79 @@ private struct MediaAttachmentView: View {
         RoundedRectangle(cornerRadius: 18, style: .continuous)
             .fill(Color(.secondarySystemFill))
             .overlay(
-                ProgressView()
-                    .progressViewStyle(.circular)
+                Group {
+                    if isLoadingRemote {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    } else if remoteLoadFailed {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ProgressView()
+                            .progressViewStyle(.circular)
+                    }
+                }
             )
+    }
+
+    private func loadRemoteImage() async {
+        if imageData != nil {
+            await MainActor.run {
+                remoteImage = nil
+                isLoadingRemote = false
+                remoteLoadFailed = false
+            }
+            return
+        }
+
+        guard let url = imageURL else {
+            await MainActor.run {
+                remoteImage = nil
+                isLoadingRemote = false
+                remoteLoadFailed = false
+            }
+            return
+        }
+
+        if let cached = await MediaCache.shared.cachedData(for: url), !Task.isCancelled {
+            if let image = UIImage(data: cached) {
+                await MainActor.run {
+                    remoteImage = image
+                    isLoadingRemote = false
+                    remoteLoadFailed = false
+                }
+                return
+            }
+        }
+
+        await MainActor.run {
+            isLoadingRemote = true
+            remoteLoadFailed = false
+        }
+
+        do {
+            let data = try await MediaCache.shared.data(for: url)
+            if Task.isCancelled { return }
+            if let image = UIImage(data: data) {
+                await MainActor.run {
+                    remoteImage = image
+                    isLoadingRemote = false
+                    remoteLoadFailed = false
+                }
+            } else {
+                await MainActor.run {
+                    remoteLoadFailed = true
+                    isLoadingRemote = false
+                }
+            }
+        } catch {
+            if Task.isCancelled { return }
+            await MainActor.run {
+                remoteLoadFailed = true
+                isLoadingRemote = false
+            }
+        }
     }
 }
 

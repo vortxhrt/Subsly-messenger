@@ -42,6 +42,7 @@ struct ThreadView: View {
     @State private var messageLimit: Int = 20
     private let pageSize: Int = 20
     private let attachmentLimit: Int = 20
+    private let prefetchMediaLimit: Int = 20
     @State private var hasMoreHistory: Bool = false
     @State private var isLoadingMore: Bool = false
     @State private var restoreScrollToId: String?
@@ -507,6 +508,30 @@ struct ThreadView: View {
         }
     }
 
+    private func prefetchMediaForLatestMessages() {
+        guard !serverMessages.isEmpty else { return }
+        let latest = serverMessages.suffix(prefetchMediaLimit)
+        Task.detached(priority: .utility) {
+            for message in latest {
+                for media in message.media {
+                    if media.localData != nil || media.localThumbnailData != nil {
+                        continue
+                    }
+                    switch media.kind {
+                    case .image:
+                        if let urlString = media.url, let url = URL(string: urlString) {
+                            await MediaCache.shared.prefetch(url: url)
+                        }
+                    case .video:
+                        if let thumbString = media.thumbnailURL, let url = URL(string: thumbString) {
+                            await MediaCache.shared.prefetch(url: url)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     private func removePendingAttachment(_ attachment: PendingAttachment) {
         if let url = attachment.fileURL {
             try? FileManager.default.removeItem(at: url)
@@ -740,6 +765,7 @@ struct ThreadView: View {
                 self.serverMessages = filtered
                 self.removeSatisfiedPending(using: filtered)
                 self.rebuildMessages()
+                self.prefetchMediaForLatestMessages()
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
