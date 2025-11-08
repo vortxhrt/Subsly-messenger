@@ -17,6 +17,48 @@ struct MessageModel: Identifiable, Hashable {
         let localThumbnailData: Data?
     }
 
+    struct ReplyPreview: Hashable {
+        let messageId: String
+        let senderId: String?
+        let senderName: String?
+        let text: String?
+        let mediaKind: MessageModel.Media.Kind?
+
+        var displayName: String {
+            if let senderName, !senderName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return senderName
+            }
+            if let senderId, !senderId.isEmpty {
+                return senderId
+            }
+            return "Message"
+        }
+
+        var summary: String {
+            let trimmed = (text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+            if let mediaKind {
+                switch mediaKind {
+                case .image:
+                    return "Photo"
+                case .video:
+                    return "Video"
+                }
+            }
+            return "Message"
+        }
+
+        func withSenderName(_ name: String?) -> ReplyPreview {
+            ReplyPreview(messageId: messageId,
+                         senderId: senderId,
+                         senderName: name,
+                         text: text,
+                         mediaKind: mediaKind)
+        }
+    }
+
     let id: String          // non-optional so ForEach never sees an optional
     let senderId: String
     let text: String
@@ -24,4 +66,5 @@ struct MessageModel: Identifiable, Hashable {
     let media: Media?
     let deliveredTo: [String]
     let readBy: [String]
+    let replyTo: ReplyPreview?
 }

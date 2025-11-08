@@ -5,12 +5,14 @@ import UIKit
 struct ComposerView: View {
     @Binding var text: String
     @Binding var attachment: PendingAttachment?
+    @Binding var replyPreview: MessageModel.ReplyPreview?
     var canSend: Bool
     var isProcessingAttachment: Bool
     var onSend: () -> Void
     var onTyping: (Bool) -> Void = { _ in }   // keep for typing indicator
     var onPickAttachment: (PhotosPickerItem) -> Void
     var onRemoveAttachment: () -> Void
+    var onCancelReply: () -> Void = {}
 
     @FocusState private var isFocused: Bool
 
@@ -26,6 +28,11 @@ struct ComposerView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
+            if let replyPreview {
+                ReplyComposerPreview(preview: replyPreview, onCancel: onCancelReply)
+                    .padding(.horizontal, sideGap)
+            }
+
             if let attachment {
                 AttachmentPreviewView(
                     attachment: attachment,
@@ -187,5 +194,69 @@ private struct AttachmentPreviewView: View {
             RoundedRectangle(cornerRadius: 18, style: .continuous)
                 .fill(Color(.secondarySystemFill))
         )
+    }
+}
+
+private struct ReplyComposerPreview: View {
+    let preview: MessageModel.ReplyPreview
+    let onCancel: () -> Void
+
+    private var iconName: String? {
+        guard preview.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true else {
+            return nil
+        }
+        switch preview.mediaKind {
+        case .some(.image):
+            return "photo"
+        case .some(.video):
+            return "video"
+        default:
+            return nil
+        }
+    }
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(Color.accentColor)
+                .frame(width: 3)
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(preview.displayName)
+                    .font(.caption)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.secondary)
+
+                if let iconName {
+                    Label(preview.summary, systemImage: iconName)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .labelStyle(.titleAndIcon)
+                        .lineLimit(2)
+                } else {
+                    Text(preview.summary)
+                        .font(.subheadline)
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+                }
+            }
+
+            Spacer()
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Cancel reply")
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 12)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color(.secondarySystemFill))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 }

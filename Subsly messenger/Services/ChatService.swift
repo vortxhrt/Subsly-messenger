@@ -39,7 +39,11 @@ actor ChatService {
     }
 
     // MARK: Send message + bump preview/timestamp
-    func sendMessage(threadId: String, from senderId: String, text: String, attachment: PendingAttachment? = nil) async throws {
+    func sendMessage(threadId: String,
+                     from senderId: String,
+                     text: String,
+                     attachment: PendingAttachment? = nil,
+                     reply: MessageModel.ReplyPreview? = nil) async throws {
         guard let threadsCol = await threadsCollection() else {
             print("✈️ Offline/local mode: not sending message.")
             return
@@ -67,6 +71,14 @@ actor ChatService {
             if let duration = uploadedAttachment.duration {
                 payload["mediaDuration"] = duration
             }
+        }
+
+        if let reply {
+            payload["replyToMessageId"] = reply.messageId
+            if let replySenderId = reply.senderId { payload["replyToSenderId"] = replySenderId }
+            if let replySenderName = reply.senderName { payload["replyToSenderName"] = replySenderName }
+            if let replyText = reply.text { payload["replyToText"] = replyText }
+            if let mediaKind = reply.mediaKind { payload["replyToMediaType"] = mediaKind.rawValue }
         }
 
         try await msgRef.setData(payload, merge: true)
@@ -146,7 +158,8 @@ actor ChatService {
                     createdAt: ts,
                     media: media,
                     deliveredTo: delivered,
-                    readBy: read
+                    readBy: read,
+                    replyTo: ChatService.mapReply(from: data)
                 )
             }
             onChange(models)
@@ -238,6 +251,33 @@ actor ChatService {
             duration: duration,
             localData: nil,
             localThumbnailData: nil
+        )
+    }
+
+    nonisolated private static func mapReply(from data: [String: Any]) -> MessageModel.ReplyPreview? {
+        guard let messageId = data["replyToMessageId"] as? String, !messageId.isEmpty else {
+            return nil
+        }
+
+        let senderId = data["replyToSenderId"] as? String
+        let senderName = data["replyToSenderName"] as? String
+        let text = data["replyToText"] as? String
+
+        let rawMediaType = (data["replyToMediaType"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let mediaKind: MessageModel.Media.Kind?
+        if let rawMediaType, !rawMediaType.isEmpty {
+            mediaKind = MessageModel.Media.Kind(rawValue: rawMediaType)
+        } else {
+            mediaKind = nil
+        }
+
+        return MessageModel.ReplyPreview(
+            messageId: messageId,
+            senderId: senderId,
+            senderName: senderName,
+            text: text,
+            mediaKind: mediaKind
         )
     }
 }

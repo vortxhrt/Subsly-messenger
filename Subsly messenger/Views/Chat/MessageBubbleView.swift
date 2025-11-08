@@ -13,10 +13,12 @@ struct MessageBubbleView: View {
     let media: MessageModel.Media?
     let isMe: Bool
     let createdAt: Date?
+    let replyTo: MessageModel.ReplyPreview?
     let isExpanded: Bool
     let status: DeliveryState?       // only used for outgoing (isMe == true)
     let onTap: () -> Void
     var onAttachmentTap: (MessageModel.Media) -> Void = { _ in }
+    var onReply: () -> Void = {}
 
     // Small margin from the screen edge (messages only)
     private let edgeInset: CGFloat = 10
@@ -25,6 +27,18 @@ struct MessageBubbleView: View {
     // ~75% of screen like iMessage
     private var maxBubbleWidth: CGFloat {
         UIScreen.main.bounds.width * 0.75
+    }
+
+    private var trimmedText: String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var hasText: Bool {
+        !trimmedText.isEmpty
+    }
+
+    private var hasBubbleContent: Bool {
+        hasText || replyTo != nil
     }
 
     var body: some View {
@@ -44,33 +58,16 @@ struct MessageBubbleView: View {
                 }
             }
 
-            if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            if hasBubbleContent {
                 HStack(spacing: 0) {
-                    if isMe {
-                        Spacer(minLength: 0)
+                    if isMe { Spacer(minLength: 0) }
 
-                        Text(text)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 14)
-                            .foregroundStyle(.white)
-                            .background(Color.accentColor)
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
-                            .padding(.trailing, edgeInset)   // small right gap
-                    } else {
-                        Text(text)
-                            .padding(.vertical, 10)
-                            .padding(.horizontal, 14)
-                            .foregroundStyle(.primary)
-                            .background(Color(.secondarySystemFill))
-                            .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                            .padding(.leading, edgeInset)    // small left gap
+                    bubbleContainer
+                        .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
+                        .padding(.trailing, isMe ? edgeInset : 0)
+                        .padding(.leading, isMe ? 0 : edgeInset)
 
-                        Spacer(minLength: 0)
-                    }
+                    if !isMe { Spacer(minLength: 0) }
                 }
                 .contentShape(Rectangle())
                 .onTapGesture(perform: onTap)
@@ -95,8 +92,62 @@ struct MessageBubbleView: View {
             }
         }
         .padding(.vertical, verticalSpacing)
+        .contextMenu {
+            if hasText {
+                Button(action: copyText) {
+                    Label("Copy", systemImage: "doc.on.doc")
+                }
+            }
+            Button(action: onReply) {
+                Label("Reply", systemImage: "arrowshape.turn.up.left")
+            }
+        }
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(accessibilityLabel)
+    }
+
+    private var bubbleContainer: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let replyTo {
+                replyPreviewView(replyTo)
+            }
+            if hasText {
+                Text(text)
+                    .foregroundStyle(isMe ? Color.white : Color.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.vertical, 10)
+        .padding(.horizontal, 14)
+        .background(isMe ? Color.accentColor : Color(.secondarySystemFill))
+        .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
+        .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func replyPreviewView(_ preview: MessageModel.ReplyPreview) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(preview.displayName)
+                .font(.caption)
+                .fontWeight(.semibold)
+                .foregroundStyle(isMe ? Color.white.opacity(0.75) : Color.secondary)
+            Text(preview.summary)
+                .font(.subheadline)
+                .foregroundStyle(isMe ? Color.white : Color.primary)
+                .lineLimit(2)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(isMe ? Color.white.opacity(0.18) : Color(.tertiarySystemFill))
+        )
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private func copyText() {
+        let value = trimmedText.isEmpty ? text : trimmedText
+        UIPasteboard.general.string = value
     }
 
     private var accessibilityLabel: String {
@@ -104,8 +155,11 @@ struct MessageBubbleView: View {
         if let media {
             components.append(media.kind == .video ? "Video" : "Photo")
         }
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        if !trimmedText.isEmpty {
             components.append(isMe ? "Your message" : "Message")
+        }
+        if let replyTo {
+            components.append("Reply to \(replyTo.summary)")
         }
         if components.isEmpty {
             components.append(isMe ? "Your message" : "Message")

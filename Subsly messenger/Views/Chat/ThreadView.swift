@@ -45,6 +45,8 @@ struct ThreadView: View {
     @State private var hasPerformedInitialScroll = false
     @State private var showingProfile = false
 
+    @State private var replyPreview: MessageModel.ReplyPreview?
+
     @State private var pendingAttachment: PendingAttachment?
     @State private var isProcessingAttachment = false
     @State private var attachmentTask: Task<Void, Never>?
@@ -93,12 +95,14 @@ struct ThreadView: View {
                                 media: msg.media,
                                 isMe: msg.senderId == myId,
                                 createdAt: msg.createdAt,
+                                replyTo: enrichedReplyPreview(for: msg),
                                 isExpanded: expandedMessageIDs.contains(msg.id),
                                 status: statusForMessage(msg),
                                 onTap: { handleTap(on: msg.id) },
                                 onAttachmentTap: { media in
                                     mediaViewer = MediaViewerPayload(media: media)
-                                }
+                                },
+                                onReply: { startReply(with: msg) }
                             )
                         }
 
@@ -165,6 +169,7 @@ struct ThreadView: View {
                     ComposerView(
                         text: $inputText,
                         attachment: $pendingAttachment,
+                        replyPreview: $replyPreview,
                         canSend: canSend,
                         isProcessingAttachment: isProcessingAttachment,
                         onSend: send,
@@ -186,6 +191,9 @@ struct ThreadView: View {
                                 try? FileManager.default.removeItem(at: url)
                             }
                             pendingAttachment = nil
+                        },
+                        onCancelReply: {
+                            replyPreview = nil
                         }
                     )
                 }
@@ -383,6 +391,8 @@ struct ThreadView: View {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || pendingAttachment != nil else { return }
 
+        let replyContext = replyPreview
+
         // Create a local outgoing message with a unique id and mark as pending.
         let localId = "local-" + UUID().uuidString
         let local = MessageModel(
@@ -392,13 +402,15 @@ struct ThreadView: View {
             createdAt: Date(),
             media: pendingAttachment?.asMessageMedia(),
             deliveredTo: [],
-            readBy: []
+            readBy: [],
+            replyTo: replyContext
         )
         pendingOutgoingIDs.insert(localId)
         messages.append(local)
         inputText = ""
         let attachmentCopy = pendingAttachment
         pendingAttachment = nil
+        replyPreview = nil
 
         // Fire off the real send; when it completes, clear pending for that local id.
         Task {
@@ -407,7 +419,8 @@ struct ThreadView: View {
                     threadId: tid,
                     from: myId,
                     text: trimmed,
-                    attachment: attachmentCopy
+                    attachment: attachmentCopy,
+                    reply: replyContext
                 )
             } catch {
                 if let url = attachmentCopy?.fileURL {
@@ -431,6 +444,48 @@ struct ThreadView: View {
     private func purgeStalePendingIDs() {
         let present = Set(messages.map { $0.id })
         pendingOutgoingIDs = pendingOutgoingIDs.intersection(present)
+    }
+
+    // MARK: - Reply handling
+
+    private func startReply(with message: MessageModel) {
+        let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let previewText = trimmed.isEmpty ? nil : trimmed
+        let name = resolvedDisplayName(for: message.senderId)
+        replyPreview = MessageModel.ReplyPreview(
+            messageId: message.id,
+            senderId: message.senderId,
+            senderName: name,
+            text: previewText,
+            mediaKind: message.media?.kind
+        )
+
+        Task { await usersStore.ensure(uid: message.senderId) }
+    }
+
+    private func enrichedReplyPreview(for message: MessageModel) -> MessageModel.ReplyPreview? {
+        guard let preview = message.replyTo else { return nil }
+        if preview.senderName != nil {
+            return preview
+        }
+        guard let senderId = preview.senderId else { return preview }
+        let name = resolvedDisplayName(for: senderId)
+        return preview.withSenderName(name)
+    }
+
+    private func resolvedDisplayName(for uid: String) -> String {
+        if uid == myId {
+            let trimmed = currentUser.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                return trimmed
+            }
+            let handleTrimmed = currentUser.handle.trimmingCharacters(in: .whitespacesAndNewlines)
+            return handleTrimmed.isEmpty ? "You" : handleTrimmed
+        }
+        if let name = usersStore.displayName(for: uid) {
+            return name
+        }
+        return "User \(uid.prefix(6))"
     }
 
     private func handleAttachmentSelection(_ item: PhotosPickerItem) {
