@@ -22,7 +22,17 @@ struct UploadedAttachment {
 actor AttachmentService {
     static let shared = AttachmentService()
 
-    func upload(_ attachment: PendingAttachment, threadId: String) async throws -> UploadedAttachment {
+    func upload(_ attachments: [PendingAttachment], threadId: String) async throws -> [UploadedAttachment] {
+        guard !attachments.isEmpty else { return [] }
+        var results: [UploadedAttachment] = []
+        for attachment in attachments {
+            let uploaded = try await uploadSingle(attachment, threadId: threadId)
+            results.append(uploaded)
+        }
+        return results
+    }
+
+    private func uploadSingle(_ attachment: PendingAttachment, threadId: String) async throws -> UploadedAttachment {
         let storage = Storage.storage()
         let root = storage.reference().child("threads/\(threadId)/attachments")
 

@@ -4,14 +4,14 @@ import UIKit
 
 struct ComposerView: View {
     @Binding var text: String
-    @Binding var attachment: PendingAttachment?
+    @Binding var attachments: [PendingAttachment]
     @Binding var replyPreview: MessageModel.ReplyPreview?
     var canSend: Bool
     var isProcessingAttachment: Bool
     var onSend: () -> Void
     var onTyping: (Bool) -> Void = { _ in }   // keep for typing indicator
-    var onPickAttachment: (PhotosPickerItem) -> Void
-    var onRemoveAttachment: () -> Void
+    var onPickAttachments: ([PhotosPickerItem]) -> Void
+    var onRemoveAttachment: (PendingAttachment) -> Void
     var onCancelReply: () -> Void = {}
 
     @FocusState private var isFocused: Bool
@@ -22,9 +22,10 @@ struct ComposerView: View {
     private let innerH: CGFloat = 12
     private let innerV: CGFloat = 9
     private let maxLines: Int = 6
+    private let attachmentLimit: Int = 20
 
     @State private var typingDebounceTask: Task<Void, Never>?
-    @State private var pickerItem: PhotosPickerItem?
+    @State private var pickerItems: [PhotosPickerItem] = []
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -33,17 +34,47 @@ struct ComposerView: View {
                     .padding(.horizontal, sideGap)
             }
 
-            if let attachment {
-                AttachmentPreviewView(
-                    attachment: attachment,
-                    isProcessing: isProcessingAttachment,
-                    onRemove: onRemoveAttachment
-                )
+            if !attachments.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(attachments) { attachment in
+                        AttachmentPreviewView(
+                            attachment: attachment,
+                            onRemove: { onRemoveAttachment(attachment) }
+                        )
+                    }
+
+                    HStack {
+                        Text("\(attachments.count) / \(attachmentLimit) attachments selected")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        if isProcessingAttachment {
+                            HStack(spacing: 6) {
+                                ProgressView()
+                                    .progressViewStyle(.circular)
+                                Text("Processing…")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, sideGap)
+            } else if isProcessingAttachment {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                    Text("Processing attachments…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
                 .padding(.horizontal, sideGap)
             }
 
             HStack(spacing: 8) {
-                PhotosPicker(selection: $pickerItem, matching: .any(of: [.images, .videos])) {
+                PhotosPicker(selection: $pickerItems,
+                             maxSelectionCount: attachmentLimit,
+                             matching: .any(of: [.images, .videos])) {
                     Image(systemName: "paperclip")
                         .font(.system(size: 17, weight: .semibold))
                         .frame(width: 22, height: 22)
@@ -54,11 +85,11 @@ struct ComposerView: View {
                                 .fill(Color(.secondarySystemFill))
                         )
                 }
-                .disabled(isProcessingAttachment)
-                .onChange(of: pickerItem) { _, newValue in
-                    guard let newValue else { return }
-                    onPickAttachment(newValue)
-                    pickerItem = nil
+                .disabled(isProcessingAttachment || attachments.count >= attachmentLimit)
+                .onChange(of: pickerItems) { _, newValue in
+                    guard !newValue.isEmpty else { return }
+                    onPickAttachments(newValue)
+                    pickerItems = []
                 }
 
                 TextField("Message...", text: $text, axis: .vertical)
@@ -120,7 +151,6 @@ struct ComposerView: View {
 
 private struct AttachmentPreviewView: View {
     let attachment: PendingAttachment
-    let isProcessing: Bool
     let onRemove: () -> Void
 
     private var previewImage: UIImage? {
@@ -165,15 +195,6 @@ private struct AttachmentPreviewView: View {
                 Text(attachment.isVideo ? "Video" : "Photo")
                     .font(.subheadline)
                     .fontWeight(.semibold)
-                if isProcessing {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .progressViewStyle(.circular)
-                        Text("Processing…")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
             }
 
             Spacer()
@@ -185,8 +206,6 @@ private struct AttachmentPreviewView: View {
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Remove attachment")
-            .disabled(isProcessing)
-            .opacity(isProcessing ? 0.5 : 1.0)
         }
         .padding(.vertical, 6)
         .padding(.horizontal, 10)

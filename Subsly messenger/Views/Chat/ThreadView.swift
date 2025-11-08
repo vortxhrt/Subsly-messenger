@@ -39,6 +39,7 @@ struct ThreadView: View {
     @State private var isOpening = false
     @State private var messageLimit: Int = 20
     private let pageSize: Int = 20
+    private let attachmentLimit: Int = 20
     @State private var hasMoreHistory: Bool = false
     @State private var isLoadingMore: Bool = false
     @State private var restoreScrollToId: String?
@@ -47,7 +48,7 @@ struct ThreadView: View {
 
     @State private var replyPreview: MessageModel.ReplyPreview?
 
-    @State private var pendingAttachment: PendingAttachment?
+    @State private var pendingAttachments: [PendingAttachment] = []
     @State private var isProcessingAttachment = false
     @State private var attachmentTask: Task<Void, Never>?
     @State private var attachmentErrorMessage: String?
@@ -64,7 +65,7 @@ struct ThreadView: View {
 
     private var canSend: Bool {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let hasAttachment = pendingAttachment != nil
+        let hasAttachment = !pendingAttachments.isEmpty
         return (!trimmed.isEmpty || hasAttachment) && !isProcessingAttachment
     }
 
@@ -173,7 +174,7 @@ struct ThreadView: View {
                     Divider().opacity(0.08)
                     ComposerView(
                         text: $inputText,
-                        attachment: $pendingAttachment,
+                        attachments: $pendingAttachments,
                         replyPreview: $replyPreview,
                         canSend: canSend,
                         isProcessingAttachment: isProcessingAttachment,
@@ -188,14 +189,11 @@ struct ThreadView: View {
                                 )
                             }
                         },
-                        onPickAttachment: { item in
-                            handleAttachmentSelection(item)
+                        onPickAttachments: { items in
+                            handleAttachmentSelection(items)
                         },
-                        onRemoveAttachment: {
-                            if let url = pendingAttachment?.fileURL {
-                                try? FileManager.default.removeItem(at: url)
-                            }
-                            pendingAttachment = nil
+                        onRemoveAttachment: { attachment in
+                            removePendingAttachment(attachment)
                         },
                         onCancelReply: {
                             replyPreview = nil
@@ -220,6 +218,12 @@ struct ThreadView: View {
                 listener?.remove(); listener = nil
                 typingListener?.remove(); typingListener = nil
                 cleanupReceiptListeners()
+                for attachment in pendingAttachments {
+                    if let url = attachment.fileURL {
+                        try? FileManager.default.removeItem(at: url)
+                    }
+                }
+                pendingAttachments.removeAll()
                 attachmentTask?.cancel(); attachmentTask = nil
                 if let tid = threadId, !myId.isEmpty {
                     Task { try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false) }
@@ -394,7 +398,7 @@ struct ThreadView: View {
         guard let tid = threadId else { return }
 
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty || pendingAttachment != nil else { return }
+        guard !trimmed.isEmpty || !pendingAttachments.isEmpty else { return }
 
         let replyContext = replyPreview
 
@@ -405,7 +409,7 @@ struct ThreadView: View {
             senderId: myId,
             text: trimmed,
             createdAt: Date(),
-            media: pendingAttachment?.asMessageMedia(),
+            media: pendingAttachments.map { $0.asMessageMedia() },
             deliveredTo: [],
             readBy: [],
             replyTo: replyContext
@@ -413,8 +417,8 @@ struct ThreadView: View {
         pendingOutgoingIDs.insert(localId)
         messages.append(local)
         inputText = ""
-        let attachmentCopy = pendingAttachment
-        pendingAttachment = nil
+        let attachmentsCopy = pendingAttachments
+        pendingAttachments.removeAll()
         replyPreview = nil
 
         // Fire off the real send; when it completes, clear pending for that local id.
@@ -424,12 +428,14 @@ struct ThreadView: View {
                     threadId: tid,
                     from: myId,
                     text: trimmed,
-                    attachment: attachmentCopy,
+                    attachments: attachmentsCopy,
                     reply: replyContext
                 )
             } catch {
-                if let url = attachmentCopy?.fileURL {
-                    try? FileManager.default.removeItem(at: url)
+                for attachment in attachmentsCopy {
+                    if let url = attachment.fileURL {
+                        try? FileManager.default.removeItem(at: url)
+                    }
                 }
                 print("Send message failed: \(error.localizedDescription)")
             }
@@ -451,6 +457,13 @@ struct ThreadView: View {
         pendingOutgoingIDs = pendingOutgoingIDs.intersection(present)
     }
 
+    private func removePendingAttachment(_ attachment: PendingAttachment) {
+        if let url = attachment.fileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+        pendingAttachments.removeAll { $0.id == attachment.id }
+    }
+
     // MARK: - Reply handling
 
     private func startReply(with message: MessageModel) {
@@ -462,7 +475,7 @@ struct ThreadView: View {
             senderId: message.senderId,
             senderName: name,
             text: previewText,
-            mediaKind: message.media?.kind
+            mediaKind: message.media.first?.kind
         )
 
         Task { await usersStore.ensure(uid: message.senderId) }
@@ -493,26 +506,59 @@ struct ThreadView: View {
         return "User \(uid.prefix(6))"
     }
 
-    private func handleAttachmentSelection(_ item: PhotosPickerItem) {
+    private func handleAttachmentSelection(_ items: [PhotosPickerItem]) {
+        guard !items.isEmpty else { return }
+        if pendingAttachments.count >= attachmentLimit {
+            attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+            showingAttachmentError = true
+            return
+        }
         attachmentTask?.cancel()
         isProcessingAttachment = true
         attachmentTask = Task {
+            var prepared: [PendingAttachment] = []
+            var hitLimit = false
             do {
-                let attachment = try await prepareAttachment(from: item)
-                await MainActor.run {
-                    if let oldURL = self.pendingAttachment?.fileURL {
-                        try? FileManager.default.removeItem(at: oldURL)
+                for item in items {
+                    try Task.checkCancellation()
+                    let currentCount = await MainActor.run { self.pendingAttachments.count }
+                    if currentCount + prepared.count >= attachmentLimit {
+                        hitLimit = true
+                        break
                     }
-                    self.pendingAttachment = attachment
+                    let attachment = try await prepareAttachment(from: item)
+                    prepared.append(attachment)
+                }
+
+                if !prepared.isEmpty {
+                    await MainActor.run {
+                        self.pendingAttachments.append(contentsOf: prepared)
+                    }
+                }
+
+                if hitLimit {
+                    await MainActor.run {
+                        self.attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+                        self.showingAttachmentError = true
+                    }
+                }
+
+                await MainActor.run {
                     self.isProcessingAttachment = false
                 }
             } catch {
+                if !prepared.isEmpty {
+                    await MainActor.run {
+                        self.pendingAttachments.append(contentsOf: prepared)
+                    }
+                }
                 await MainActor.run {
                     self.isProcessingAttachment = false
                     self.attachmentErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
                     self.showingAttachmentError = true
                 }
             }
+
             await MainActor.run {
                 self.attachmentTask = nil
             }

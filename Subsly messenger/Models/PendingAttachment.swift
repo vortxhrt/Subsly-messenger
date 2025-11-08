@@ -1,6 +1,7 @@
 import Foundation
 
-struct PendingAttachment: Sendable {
+struct PendingAttachment: Identifiable, Sendable {
+    let id = UUID()
     enum Kind: Sendable {
         case image(data: Data, width: Int, height: Int)
         case video(fileURL: URL, thumbnailData: Data, width: Int, height: Int, duration: Double)

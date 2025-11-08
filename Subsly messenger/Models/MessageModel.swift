@@ -63,7 +63,7 @@ struct MessageModel: Identifiable, Hashable {
     let senderId: String
     let text: String
     let createdAt: Date?
-    let media: Media?
+    let media: [Media]
     let deliveredTo: [String]
     let readBy: [String]
     let replyTo: ReplyPreview?

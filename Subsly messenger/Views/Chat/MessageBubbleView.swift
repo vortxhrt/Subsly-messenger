@@ -10,7 +10,7 @@ enum DeliveryState {
 
 struct MessageBubbleView: View {
     let text: String
-    let media: MessageModel.Media?
+    let media: [MessageModel.Media]
     let isMe: Bool
     let createdAt: Date?
     let replyTo: MessageModel.ReplyPreview?
@@ -44,18 +44,22 @@ struct MessageBubbleView: View {
 
     var body: some View {
         VStack(alignment: isMe ? .trailing : .leading, spacing: 6) {
-            if let media {
-                HStack(spacing: 0) {
-                    if isMe { Spacer(minLength: 0) }
-                    MediaAttachmentView(media: media)
-                        .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
-                        .padding(.leading, isMe ? 0 : edgeInset)
-                        .padding(.trailing, isMe ? edgeInset : 0)
-                        .onTapGesture {
-                            onAttachmentTap(media)
-                            onTap()
+            if !media.isEmpty {
+                VStack(spacing: 6) {
+                    ForEach(Array(media.enumerated()), id: \.offset) { _, item in
+                        HStack(spacing: 0) {
+                            if isMe { Spacer(minLength: 0) }
+                            MediaAttachmentView(media: item)
+                                .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
+                                .padding(.leading, isMe ? 0 : edgeInset)
+                                .padding(.trailing, isMe ? edgeInset : 0)
+                                .onTapGesture {
+                                    onAttachmentTap(item)
+                                    onTap()
+                                }
+                            if !isMe { Spacer(minLength: 0) }
                         }
-                    if !isMe { Spacer(minLength: 0) }
+                    }
                 }
             }
 
@@ -155,8 +159,17 @@ struct MessageBubbleView: View {
 
     private var accessibilityLabel: String {
         var components: [String] = []
-        if let media {
-            components.append(media.kind == .video ? "Video" : "Photo")
+        if !media.isEmpty {
+            let counts = media.reduce(into: [MessageModel.Media.Kind: Int]()) { partialResult, item in
+                let key = item.kind
+                partialResult[key, default: 0] += 1
+            }
+            let descriptions = counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { entry in
+                let (kind, count) = entry
+                let label = kind == .video ? "Video" : "Photo"
+                return count > 1 ? "\(count) \(label)s" : label
+            }
+            components.append(descriptions.joined(separator: ", "))
         }
         if !trimmedText.isEmpty {
             components.append(isMe ? "Your message" : "Message")

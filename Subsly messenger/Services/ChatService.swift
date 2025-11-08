@@ -42,7 +42,7 @@ actor ChatService {
     func sendMessage(threadId: String,
                      from senderId: String,
                      text: String,
-                     attachment: PendingAttachment? = nil,
+                     attachments: [PendingAttachment] = [],
                      reply: MessageModel.ReplyPreview? = nil) async throws {
         guard let threadsCol = await threadsCollection() else {
             print("✈️ Offline/local mode: not sending message.")
@@ -55,21 +55,32 @@ actor ChatService {
             "createdAt": FieldValue.serverTimestamp()
         ]
 
-        var uploadedAttachment: UploadedAttachment?
-        if let attachment {
-            uploadedAttachment = try await AttachmentService.shared.upload(attachment, threadId: threadId)
-        }
+        let uploadedAttachments = try await AttachmentService.shared.upload(attachments, threadId: threadId)
 
-        if let uploadedAttachment {
-            payload["mediaType"] = uploadedAttachment.kind.rawValue
-            payload["mediaURL"] = uploadedAttachment.mediaURL
-            if let thumb = uploadedAttachment.thumbnailURL {
+        if let first = uploadedAttachments.first {
+            payload["mediaType"] = first.kind.rawValue
+            payload["mediaURL"] = first.mediaURL
+            if let thumb = first.thumbnailURL {
                 payload["thumbnailURL"] = thumb
             }
-            payload["mediaWidth"] = uploadedAttachment.width
-            payload["mediaHeight"] = uploadedAttachment.height
-            if let duration = uploadedAttachment.duration {
+            payload["mediaWidth"] = first.width
+            payload["mediaHeight"] = first.height
+            if let duration = first.duration {
                 payload["mediaDuration"] = duration
+            }
+        }
+
+        if !uploadedAttachments.isEmpty {
+            payload["attachments"] = uploadedAttachments.map { attachment in
+                var dict: [String: Any] = [
+                    "type": attachment.kind.rawValue,
+                    "url": attachment.mediaURL,
+                    "width": attachment.width,
+                    "height": attachment.height
+                ]
+                if let thumb = attachment.thumbnailURL { dict["thumbnailURL"] = thumb }
+                if let duration = attachment.duration { dict["duration"] = duration }
+                return dict
             }
         }
 
@@ -86,8 +97,20 @@ actor ChatService {
         let previewText: String
         if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             previewText = text
-        } else if let uploadedAttachment {
-            previewText = uploadedAttachment.previewText
+        } else if !uploadedAttachments.isEmpty {
+            if uploadedAttachments.count == 1, let first = uploadedAttachments.first {
+                previewText = first.previewText
+            } else {
+                let counts = uploadedAttachments.reduce(into: [MessageModel.Media.Kind: Int]()) { partialResult, attachment in
+                    partialResult[attachment.kind, default: 0] += 1
+                }
+                let descriptions = counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { entry -> String in
+                    let (kind, count) = entry
+                    let label = kind == .video ? "Video" : "Photo"
+                    return count > 1 ? "\(count) \(label)s" : label
+                }
+                previewText = descriptions.joined(separator: ", ")
+            }
         } else {
             previewText = ""
         }
@@ -148,7 +171,7 @@ actor ChatService {
                 let data = doc.data()
                 let ts = (data["createdAt"] as? Timestamp)?.dateValue()
                 let text = data["text"] as? String ?? ""
-                let media = Self.mapMedia(from: data)
+                let media = Self.mapMediaList(from: data)
                 let delivered = data["deliveredTo"] as? [String] ?? []
                 let read = data["readBy"] as? [String] ?? []
                 return MessageModel(
@@ -174,13 +197,22 @@ actor ChatService {
         return ThreadModel(id: id, members: members, lastMessagePreview: last, updatedAt: updated)
     }
 
-    nonisolated private static func mapMedia(from data: [String: Any]) -> MessageModel.Media? {
-        if let attachments = data["attachments"] as? [[String: Any]],
-           let first = attachments.first,
-           let legacyAttachment = mapAttachmentDict(first) {
-            return legacyAttachment
+    nonisolated private static func mapMediaList(from data: [String: Any]) -> [MessageModel.Media] {
+        if let attachments = data["attachments"] as? [[String: Any]] {
+            let mapped = attachments.compactMap { mapAttachmentDict($0) }
+            if !mapped.isEmpty {
+                return mapped
+            }
         }
 
+        if let legacy = mapLegacyMedia(from: data) {
+            return [legacy]
+        }
+
+        return []
+    }
+
+    nonisolated private static func mapLegacyMedia(from data: [String: Any]) -> MessageModel.Media? {
         guard let typeRaw = data["mediaType"] as? String,
               let kind = MessageModel.Media.Kind(rawValue: typeRaw) else {
             return nil
