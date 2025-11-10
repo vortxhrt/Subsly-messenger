@@ -35,7 +35,11 @@ struct PeopleSearchView: View {
                                 AvatarView(
                                     avatarURL: user.avatarURL,
                                     name: displayName(for: user),
-                                    size: 40
+                                    size: 40,
+                                    status: AvatarView.OnlineStatus(
+                                        isOnline: user.isOnline,
+                                        isVisible: user.shareOnlineStatus
+                                    )
                                 )
 
                                 VStack(alignment: .leading) {
@@ -90,13 +94,19 @@ struct PeopleSearchView: View {
                 let avatar = data["avatarURL"] as? String
                 let ts = data["createdAt"] as? Timestamp
                 let bio = data["bio"] as? String
+                let isOnline = data["isOnline"] as? Bool ?? false
+                let shareOnlineStatus = data["shareOnlineStatus"] as? Bool ?? true
+                let lastOnlineAt = (data["lastOnlineAt"] as? Timestamp)?.dateValue()
                 let u = AppUser(
                     id: doc.documentID,
                     handle: handle,
                     displayName: display,
                     avatarURL: avatar,
                     bio: bio,
-                    createdAt: ts?.dateValue()
+                    createdAt: ts?.dateValue(),
+                    isOnline: isOnline,
+                    shareOnlineStatus: shareOnlineStatus,
+                    lastOnlineAt: lastOnlineAt
                 )
                 if u.id != currentUser.id { list.append(u) }
             }

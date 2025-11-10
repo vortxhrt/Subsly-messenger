@@ -1,9 +1,15 @@
 import SwiftUI
 
 struct AvatarView: View {
+    struct OnlineStatus {
+        let isOnline: Bool
+        let isVisible: Bool
+    }
+
     let avatarURL: String?
     let name: String
     var size: CGFloat = 40
+    var status: OnlineStatus? = nil
 
     private var initials: String {
         let components = name
@@ -33,8 +39,36 @@ struct AvatarView: View {
         return url
     }
 
+    private var indicatorSize: CGFloat {
+        max(12, size * 0.32)
+    }
+
     var body: some View {
-        ZStack {
+        ZStack(alignment: .bottomTrailing) {
+            avatarContent
+                .frame(width: size, height: size)
+                .clipShape(Circle())
+                .overlay(
+                    Circle().stroke(Color.black.opacity(0.04), lineWidth: 1)
+                )
+                .accessibilityHidden(true)
+
+            if let status, status.isVisible {
+                Circle()
+                    .fill(status.isOnline ? Color.green : Color.gray)
+                    .frame(width: indicatorSize, height: indicatorSize)
+                    .overlay(
+                        Circle()
+                            .stroke(Color(.systemBackground), lineWidth: max(1, indicatorSize * 0.15))
+                    )
+                    .offset(x: indicatorSize * 0.15, y: indicatorSize * 0.15)
+                    .accessibilityLabel(status.isOnline ? "Online" : "Offline")
+            }
+        }
+    }
+
+    private var avatarContent: some View {
+        Group {
             if let url = remoteURL {
                 CachedAsyncImage(url: url) { phase in
                     switch phase {
@@ -53,12 +87,6 @@ struct AvatarView: View {
                 placeholder
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(Circle())
-        .overlay(
-            Circle().stroke(Color.black.opacity(0.04), lineWidth: 1)
-        )
-        .accessibilityHidden(true)
     }
 
     private var placeholder: some View {
@@ -75,9 +103,9 @@ struct AvatarView: View {
 struct AvatarView_Previews: PreviewProvider {
     static var previews: some View {
         VStack(spacing: 20) {
-            AvatarView(avatarURL: nil, name: "Taylor Swift", size: 48)
-            AvatarView(avatarURL: nil, name: "A", size: 48)
-            AvatarView(avatarURL: "https://example.com/avatar.png", name: "Sam Sample", size: 48)
+            AvatarView(avatarURL: nil, name: "Taylor Swift", size: 48, status: .init(isOnline: true, isVisible: true))
+            AvatarView(avatarURL: nil, name: "A", size: 48, status: .init(isOnline: false, isVisible: true))
+            AvatarView(avatarURL: "https://example.com/avatar.png", name: "Sam Sample", size: 48, status: nil)
         }
         .padding()
         .previewLayout(.sizeThatFits)

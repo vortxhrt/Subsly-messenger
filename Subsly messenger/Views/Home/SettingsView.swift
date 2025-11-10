@@ -13,21 +13,25 @@ struct SettingsView: View {
     @State private var pickerItem: PhotosPickerItem?
     @State private var isUploading = false
     @State private var isSavingProfile = false
+    @State private var isUpdatingPresence = false
     @State private var statusMessage: String?
     @State private var statusIsError = false
     @State private var bioText: String
+    @State private var shareOnlineStatus: Bool
 
     init(currentUser: AppUser, onBackToChats: (() -> Void)? = nil) {
         self.currentUser = currentUser
         self.onBackToChats = onBackToChats
         _workingUser = State(initialValue: currentUser)
         _bioText = State(initialValue: currentUser.bio ?? "")
+        _shareOnlineStatus = State(initialValue: currentUser.shareOnlineStatus)
     }
 
     var body: some View {
         NavigationStack {
             List {
                 profileSection
+                presenceSection
                 aboutSection
                 accountSection
             }
@@ -54,6 +58,7 @@ struct SettingsView: View {
             if let updated = newValue {
                 workingUser = updated
                 bioText = updated.bio ?? ""
+                shareOnlineStatus = updated.shareOnlineStatus
             }
         }
         .onChange(of: pickerItem) { _, newItem in
@@ -63,6 +68,10 @@ struct SettingsView: View {
         .onChange(of: bioText) { _, newValue in
             enforceBioLimit(for: newValue)
         }
+        .onChange(of: shareOnlineStatus) { _, newValue in
+            guard workingUser.shareOnlineStatus != newValue else { return }
+            Task { await updatePresencePreference(to: newValue) }
+        }
     }
 
     private var profileSection: some View {
@@ -71,7 +80,11 @@ struct SettingsView: View {
                 AvatarView(
                     avatarURL: workingUser.avatarURL,
                     name: displayName,
-                    size: 96
+                    size: 96,
+                    status: AvatarView.OnlineStatus(
+                        isOnline: workingUser.isOnline,
+                        isVisible: workingUser.shareOnlineStatus
+                    )
                 )
                 .frame(maxWidth: .infinity)
 
@@ -104,6 +117,25 @@ struct SettingsView: View {
             .frame(maxWidth: .infinity, alignment: .center)
             .multilineTextAlignment(.center)
             .padding(.vertical, 4)
+        }
+    }
+
+    private var presenceSection: some View {
+        Section("Presence") {
+            Toggle(isOn: $shareOnlineStatus) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Share Online Status")
+                    Text("Allow others to see when you're online.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+            .disabled(isUpdatingPresence)
+
+            if isUpdatingPresence {
+                ProgressView("Updating status…")
+            }
         }
     }
 
@@ -282,6 +314,54 @@ struct SettingsView: View {
         }
 
         await MainActor.run { isSavingProfile = false }
+    }
+
+    private func updatePresencePreference(to newValue: Bool) async {
+        let uid: String
+        if let current = session.currentUser, let id = current.id {
+            uid = id
+        } else if let id = workingUser.id {
+            uid = id
+        } else {
+            return
+        }
+
+        await MainActor.run {
+            isUpdatingPresence = true
+            statusMessage = nil
+            statusIsError = false
+        }
+
+        do {
+            try await UserService.shared.setShareOnlineStatus(uid: uid, isEnabled: newValue)
+            if newValue {
+                await session.setPresence(isOnline: true)
+            }
+
+            await MainActor.run {
+                workingUser.shareOnlineStatus = newValue
+                if !newValue {
+                    workingUser.isOnline = false
+                } else {
+                    workingUser.isOnline = session.currentUser?.isOnline ?? true
+                }
+                shareOnlineStatus = newValue
+                var updated = workingUser
+                updated.id = uid
+                session.currentUser = updated
+                usersStore.upsert(updated)
+                statusMessage = newValue ? "Online status sharing enabled." : "Online status sharing disabled."
+                statusIsError = false
+            }
+        } catch {
+            await MainActor.run {
+                statusMessage = error.localizedDescription
+                statusIsError = true
+                shareOnlineStatus = workingUser.shareOnlineStatus
+            }
+        }
+
+        await MainActor.run { isUpdatingPresence = false }
     }
 
     private func resizedImage(from image: UIImage, maxDimension: CGFloat = 720) -> UIImage {
