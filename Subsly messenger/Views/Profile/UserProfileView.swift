@@ -10,7 +10,11 @@ struct UserProfileView: View {
                 if let profile = profile {
                     AvatarView(avatarURL: profile.avatarURL,
                                name: profileDisplayName,
-                               size: 120)
+                               size: 120,
+                               status: AvatarView.OnlineStatus(
+                                   isOnline: profile.isOnline,
+                                   isVisible: profile.shareOnlineStatus
+                               ))
                         .padding(.top, 24)
 
                     VStack(spacing: 4) {

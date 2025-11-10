@@ -16,7 +16,9 @@ actor UserService {
             "handle": handle,
             "handleLower": handle.lowercased(),
             "displayName": displayName,
-            "createdAt": FieldValue.serverTimestamp()
+            "createdAt": FieldValue.serverTimestamp(),
+            "shareOnlineStatus": true,
+            "isOnline": false
         ]
         if let avatarURL, !avatarURL.isEmpty {
             payload["avatarURL"] = avatarURL
@@ -46,13 +48,19 @@ actor UserService {
         let avatarURL = data["avatarURL"] as? String
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue()
         let bio = data["bio"] as? String
+        let isOnline = data["isOnline"] as? Bool ?? false
+        let shareOnlineStatus = data["shareOnlineStatus"] as? Bool ?? true
+        let lastOnlineAt = (data["lastOnlineAt"] as? Timestamp)?.dateValue()
         return await MainActor.run {
             AppUser(id: id,
                     handle: handle,
                     displayName: displayName,
                     avatarURL: avatarURL,
                     bio: bio,
-                    createdAt: createdAt)
+                    createdAt: createdAt,
+                    isOnline: isOnline,
+                    shareOnlineStatus: shareOnlineStatus,
+                    lastOnlineAt: lastOnlineAt)
         }
     }
 
@@ -61,6 +69,23 @@ actor UserService {
         let snap = try await db.collection("users").document(uid).getDocument()
         guard let data = snap.data() else { return nil }
         return await mapUser(id: snap.documentID, data: data)
+    }
+
+    func listenUser(uid: String, onChange: @escaping (AppUser?) -> Void) -> ListenerRegistration {
+        db.collection("users").document(uid).addSnapshotListener { snapshot, error in
+            guard error == nil else {
+                onChange(nil)
+                return
+            }
+            guard let snapshot, let data = snapshot.data() else {
+                onChange(nil)
+                return
+            }
+            Task {
+                let user = await self.mapUser(id: snapshot.documentID, data: data)
+                onChange(user)
+            }
+        }
     }
 
     // Current user for SessionStore
@@ -92,6 +117,27 @@ actor UserService {
             payload["bio"] = FieldValue.delete()
         }
 
+        try await db.collection("users").document(uid).setData(payload, merge: true)
+    }
+
+    func setOnlineStatus(uid: String, isOnline: Bool) async throws {
+        var payload: [String: Any] = [
+            "isOnline": isOnline,
+            "updatedAt": FieldValue.serverTimestamp(),
+            "lastOnlineAt": FieldValue.serverTimestamp()
+        ]
+        try await db.collection("users").document(uid).setData(payload, merge: true)
+    }
+
+    func setShareOnlineStatus(uid: String, isEnabled: Bool) async throws {
+        var payload: [String: Any] = [
+            "shareOnlineStatus": isEnabled,
+            "updatedAt": FieldValue.serverTimestamp()
+        ]
+        if !isEnabled {
+            payload["isOnline"] = false
+            payload["lastOnlineAt"] = FieldValue.serverTimestamp()
+        }
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
 }

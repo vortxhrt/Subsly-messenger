@@ -33,6 +33,14 @@ final class SessionStore: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
+        if uid == nil, let previousId = currentUser?.id {
+            do {
+                try await UserService.shared.setOnlineStatus(uid: previousId, isOnline: false)
+            } catch {
+                print("SessionStore.reload offline update error:", error.localizedDescription)
+            }
+        }
+
         guard let uid = uid else {
             currentUser = nil
             return
@@ -51,4 +59,20 @@ final class SessionStore: ObservableObject {
 
     /// Convenience getter for the current user's ID
     var id: String? { currentUser?.id }
+
+    /// Updates the current user's presence state if sharing is enabled.
+    func setPresence(isOnline: Bool) async {
+        guard var user = currentUser, let uid = user.id else { return }
+        let effectiveStatus = user.shareOnlineStatus && isOnline
+        if user.isOnline == effectiveStatus { return }
+
+        do {
+            try await UserService.shared.setOnlineStatus(uid: uid, isOnline: effectiveStatus)
+            user.isOnline = effectiveStatus
+            user.lastOnlineAt = Date()
+            currentUser = user
+        } catch {
+            print("SessionStore.setPresence error:", error.localizedDescription)
+        }
+    }
 }
