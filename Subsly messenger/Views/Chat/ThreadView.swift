@@ -881,6 +881,11 @@ struct ThreadView: View {
         return "User \(otherUID.prefix(6))"
     }
 
+    private var otherStatus: AvatarView.OnlineStatus? {
+        guard let user = otherUser else { return nil }
+        return AvatarView.OnlineStatus(isOnline: user.isOnline, isVisible: user.shareOnlineStatus)
+    }
+
     private func senderMetadata(for message: MessageModel) -> (avatarURL: String?, displayName: String) {
         let senderId = message.senderId
 
@@ -902,7 +907,7 @@ struct ThreadView: View {
     private var profileHeader: some View {
         Button(action: { showingProfile = true }) {
             HStack(spacing: 12) {
-                AvatarView(avatarURL: otherAvatarURL, name: otherAvatarLabel, size: 32)
+                AvatarView(avatarURL: otherAvatarURL, name: otherAvatarLabel, size: 32, status: otherStatus)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(otherDisplayName.isEmpty ? "Chat" : otherDisplayName)
                         .font(.headline)

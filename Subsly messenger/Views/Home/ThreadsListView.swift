@@ -105,6 +105,11 @@ private struct ThreadRow: View {
         return "User \(otherId.prefix(6))"
     }
 
+    private var otherStatus: AvatarView.OnlineStatus? {
+        guard let user = otherUser else { return nil }
+        return AvatarView.OnlineStatus(isOnline: user.isOnline, isVisible: user.shareOnlineStatus)
+    }
+
     var body: some View {
         NavigationLink {
             ThreadView(currentUser: currentUser, otherUID: otherId)
@@ -112,7 +117,8 @@ private struct ThreadRow: View {
             HStack(spacing: 12) {
                 AvatarView(avatarURL: otherUser?.avatarURL,
                            name: avatarLabel,
-                           size: 40)
+                           size: 40,
+                           status: otherStatus)
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(otherName)
