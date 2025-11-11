@@ -93,10 +93,9 @@ struct LoginView: View {
     }
 
     private func normalizedMessage(for error: Error) -> String {
-        if let nsError = error as NSError?,
-           nsError.domain == AuthErrorDomain,
-           let code = AuthErrorCode.Code(rawValue: nsError.code) {
-            switch code {
+        if let nsError = error as NSError?, nsError.domain == AuthErrorDomain {
+            let authError = AuthErrorCode(_nsError: nsError)
+            switch authError.code {
             case .wrongPassword, .invalidCredential:
                 return "The email or password you entered is incorrect."
             case .tooManyRequests:

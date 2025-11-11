@@ -72,7 +72,7 @@ struct EmailVerificationView: View {
             }
             .padding()
             .navigationTitle("Email Verification")
-            .toolbar { ToolbarItem(placement: .topBarLeading) { EmptyView() } }
+            .toolbar { ToolbarItem(placement: .navigationBarLeading) { EmptyView() } }
         }
     }
 
