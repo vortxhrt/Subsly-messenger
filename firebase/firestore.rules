@@ -1,0 +1,213 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ---------- users ----------
+    function allowedUserFields() {
+      return ['handle', 'handleLower', 'displayName', 'createdAt', 'updatedAt', 'avatarURL', 'bio', 'shareOnlineStatus', 'isOnline', 'lastOnlineAt'];
+    }
+
+    function validUserData(data) {
+      return data.keys().hasOnly(allowedUserFields())
+        && (!data.keys().hasAny(['handle']) || data.handle is string)
+        && (!data.keys().hasAny(['handleLower']) || (data.handleLower is string && data.handleLower == data.handleLower.lower()))
+        && (!data.keys().hasAny(['displayName']) || (data.displayName is string && data.displayName.size() > 0 && data.displayName.size() <= 50))
+        && (!data.keys().hasAny(['avatarURL']) || data.avatarURL is string)
+        && (!data.keys().hasAny(['bio']) || (data.bio is string && data.bio.size() <= 160))
+        && (!data.keys().hasAny(['shareOnlineStatus']) || data.shareOnlineStatus is bool)
+        && (!data.keys().hasAny(['isOnline']) || data.isOnline is bool);
+    }
+
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create: if isOwner(userId) && validUserData(request.resource.data);
+      allow update: if isOwner(userId) && validUserData(request.resource.data);
+      allow delete: if false;
+
+      match /deviceTokens/{tokenId} {
+        function validTokenData(data) {
+          return data.keys().hasOnly(['token', 'platform', 'updatedAt'])
+            && data.token is string
+            && data.token.size() <= 512
+            && data.platform is string
+            && data.platform in ['ios']
+            && data.updatedAt == request.time;
+        }
+
+        allow read: if isOwner(userId);
+        allow create, update: if isOwner(userId) && validTokenData(request.resource.data);
+        allow delete: if isOwner(userId);
+      }
+    }
+
+    // ---------- threads ----------
+    match /threads/{threadId} {
+      function threadMembers() {
+        return get(/databases/$(database)/documents/threads/$(threadId)).data.members;
+      }
+
+      function isThreadMember(uid) {
+        return uid in threadMembers();
+      }
+
+      function validLegacyMedia(data) {
+        return !data.keys().hasAny(['mediaType'])
+               || (
+                    data.mediaType in ['image', 'video']
+                    && (!data.keys().hasAny(['mediaURL']) || data.mediaURL is string)
+                    && (!data.keys().hasAny(['thumbnailURL']) || data.thumbnailURL is string)
+                    && (!data.keys().hasAny(['mediaWidth']) || data.mediaWidth is number)
+                    && (!data.keys().hasAny(['mediaHeight']) || data.mediaHeight is number)
+                    && (!data.keys().hasAny(['mediaDuration']) || data.mediaDuration is number)
+                  );
+      }
+
+      function validAttachmentEntry(entry) {
+        return entry is map
+               && entry.keys().hasOnly(['type', 'url', 'thumbnailURL', 'width', 'height', 'duration'])
+               && entry.type in ['image', 'video']
+               && entry.url is string
+               && (!entry.keys().hasAny(['thumbnailURL']) || entry.thumbnailURL is string)
+               && (!entry.keys().hasAny(['width']) || entry.width is number)
+               && (!entry.keys().hasAny(['height']) || entry.height is number)
+               && (!entry.keys().hasAny(['duration']) || entry.duration is number);
+      }
+
+      function validAttachmentsList(list) {
+        return list is list
+               && list.size() <= 20
+               && list.all(entry, validAttachmentEntry(entry));
+      }
+
+      function validMedia(data) {
+        return validLegacyMedia(data)
+               && (!data.keys().hasAny(['attachments'])
+                   || validAttachmentsList(data.attachments));
+      }
+
+      function listOrEmpty(data, field) {
+        return data.keys().hasAny([field]) ? data[field] : [];
+      }
+
+      function isListOrMissing(data, field) {
+        return !data.keys().hasAny([field]) || data[field] is list;
+      }
+
+      function membersList() {
+        return threadMembers();
+      }
+
+      function validInitialReceiptField(data, field) {
+        return !data.keys().hasAny([field])
+               || (data[field] is list && data[field].hasOnly(membersList()));
+      }
+
+      function receiptListProgress(field) {
+        let before = listOrEmpty(resource.data, field);
+        let after = listOrEmpty(request.resource.data, field);
+        return isListOrMissing(resource.data, field)
+               && isListOrMissing(request.resource.data, field)
+               && after.hasAll(before)
+               && after.size() <= before.size() + 1
+               && (after.size() == before.size() || after.hasAny([request.auth.uid]))
+               && after.hasOnly(membersList());
+      }
+
+      function receiptsOnlyChanged() {
+        let diff = resource.data.diff(request.resource.data);
+        return diff.changedKeys().hasOnly(['deliveredTo', 'readBy'])
+               && diff.addedKeys().hasOnly(['deliveredTo', 'readBy'])
+               && diff.removedKeys().hasOnly(['deliveredTo', 'readBy']);
+      }
+
+      function messageKeysValid(data) {
+        return data.keys().hasOnly([
+          'attachments',
+          'clientMessageId',
+          'createdAt',
+          'deliveredTo',
+          'mediaDuration',
+          'mediaHeight',
+          'mediaType',
+          'mediaURL',
+          'mediaWidth',
+          'readBy',
+          'replyToMediaType',
+          'replyToMessageId',
+          'replyToSenderId',
+          'replyToSenderName',
+          'replyToText',
+          'senderId',
+          'text',
+          'thumbnailURL'
+        ]);
+      }
+
+      allow read: if isSignedIn()
+                  && (request.auth.uid in resource.data.members);
+
+      allow create: if isSignedIn()
+                    && isThreadMember(request.auth.uid)
+                    && messageKeysValid(request.resource.data)
+                    && (request.resource.data.senderId == request.auth.uid)
+                    && (request.resource.data.text is string)
+                    && (request.resource.data.text.size() <= 4000)
+                    && validMedia(request.resource.data)
+                    && validInitialReceiptField(request.resource.data, 'deliveredTo')
+                    && validInitialReceiptField(request.resource.data, 'readBy');
+
+      allow update: if isSignedIn()
+                    && isThreadMember(request.auth.uid)
+                    && receiptsOnlyChanged()
+                    && receiptListProgress('deliveredTo')
+                    && receiptListProgress('readBy');
+
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if false; // Unreachable, handled above.
+      }
+
+      match /typing/{userId} {
+        allow read: if isSignedIn()
+                    && (request.auth.uid in
+                        get(/databases/$(database)/documents/threads/$(threadId)).data.members);
+        allow create, update: if isSignedIn()
+                              && (request.auth.uid in
+                                  get(/databases/$(database)/documents/threads/$(threadId)).data.members)
+                              && (request.auth.uid == userId)
+                              && (request.resource.data.isTyping is bool);
+        allow delete: if false;
+      }
+
+      match /receipts/{messageId} {
+        allow read: if isSignedIn()
+                    && (request.auth.uid in
+                        get(/databases/$(database)/documents/threads/$(threadId)).data.members);
+        allow write: if isSignedIn()
+                     && (request.auth.uid in
+                         get(/databases/$(database)/documents/threads/$(threadId)).data.members);
+        allow delete: if false;
+      }
+
+      match /presence/{userId} {
+        allow read: if isSignedIn()
+                    && (request.auth.uid in
+                        get(/databases/$(database)/documents/threads/$(threadId)).data.members);
+        allow create, update: if isSignedIn()
+                              && (request.auth.uid in
+                                  get(/databases/$(database)/documents/threads/$(threadId)).data.members)
+                              && (request.auth.uid == userId)
+                              && (request.resource.data.isTyping is bool);
+        allow delete: if false;
+      }
+    }
+  }
+}

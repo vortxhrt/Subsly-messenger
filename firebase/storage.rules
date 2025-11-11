@@ -1,0 +1,50 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function threadDoc(threadId) {
+      return firestore.get(/databases/(default)/documents/threads/$(threadId));
+    }
+
+    function isThreadMember(threadId) {
+      return request.auth != null
+        && request.auth.uid in threadDoc(threadId).data.members;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    match /avatars/{fileId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+                   && fileId.matches('^' + request.auth.uid + '\\.(?:jpg|jpeg)$')
+                   && request.resource.contentType in ['image/jpeg']
+                   && request.resource.size < 6 * 1024 * 1024;
+      allow delete: if false;
+    }
+
+    match /threads/{threadId}/attachments/{fileName} {
+      allow read: if isThreadMember(threadId);
+
+      allow create, update: if isThreadMember(threadId)
+        && (
+          (
+            fileName.matches('^[A-Za-z0-9_-]+\\.mp4$')
+            && request.resource.contentType == 'video/mp4'
+            && request.resource.size < 40 * 1024 * 1024
+          ) ||
+          (
+            fileName.matches('^[A-Za-z0-9_-]+(?:_thumb)?\\.jpg$')
+            && request.resource.contentType == 'image/jpeg'
+            && request.resource.size < 6 * 1024 * 1024
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read: if isSignedIn();
+    }
+  }
+}
