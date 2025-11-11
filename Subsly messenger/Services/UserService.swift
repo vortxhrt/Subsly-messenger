@@ -194,70 +194,77 @@ enum ProfileSanitizer {
     }()
 
     static func sanitizeDisplayName(_ name: String, fallback: String) -> String {
-        let cleaned = stripCharacters(from: name, disallowedSet: disallowedDisplayCharacters)
-        let collapsed = collapseWhitespace(in: cleaned)
+        let cleaned = removeCharacters(from: name, disallowedSet: disallowedDisplayCharacters)
+        let collapsed = collapseWhitespace(cleaned)
         let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
         let capped = String(trimmed.prefix(50))
 
-        let fallbackCleaned = collapseWhitespace(in: fallback).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackCleaned = collapseWhitespace(fallback).trimmingCharacters(in: .whitespacesAndNewlines)
         let fallbackValue = fallbackCleaned.isEmpty ? "User" : fallbackCleaned
         return capped.isEmpty ? String(fallbackValue.prefix(50)) : capped
     }
 
     static func sanitizeBio(_ bio: String?, limit: Int = 160) -> String? {
         guard let bio else { return nil }
-        let stripped = stripCharacters(from: bio, disallowedSet: disallowedBioCharacters)
-        let normalizedNewlines = stripped.replacingOccurrences(of: "\r\n", with: "\n")
-            .replacingOccurrences(of: "\r", with: "\n")
-        let collapsed = collapseWhitespace(in: normalizedNewlines, allowNewlines: true)
+        let cleaned = removeCharacters(from: bio, disallowedSet: disallowedBioCharacters)
+        let normalizedLines = cleaned.components(separatedBy: .newlines).map { collapseLineWhitespace($0) }
+        let collapsed = joinBioLines(normalizedLines)
         let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return String(trimmed.prefix(limit))
     }
 
     static func normalizeBioDraft(_ draft: String, limit: Int) -> String {
-        let stripped = stripCharacters(from: draft, disallowedSet: disallowedBioCharacters)
-        if stripped.count <= limit { return stripped }
-        return String(stripped.prefix(limit))
+        sanitizeBio(draft, limit: limit) ?? ""
     }
 
-    private static func stripCharacters(from string: String, disallowedSet: CharacterSet) -> String {
+    private static func removeCharacters(from string: String, disallowedSet: CharacterSet) -> String {
         let scalars = string.unicodeScalars.filter { !disallowedSet.contains($0) }
         return String(String.UnicodeScalarView(scalars))
     }
 
-    private static func collapseWhitespace(in string: String, allowNewlines: Bool = false) -> String {
-        if allowNewlines {
-            let verticalWhitespace = try? NSRegularExpression(pattern: "[\t\x0B\f]+", options: [])
-            let range = NSRange(location: 0, length: string.utf16.count)
-            let cleaned = verticalWhitespace?.stringByReplacingMatches(
-                in: string,
-                options: [],
-                range: range,
-                withTemplate: ""
-            ) ?? string
+    private static func collapseWhitespace(_ string: String) -> String {
+        string
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+    }
 
-            let multipleSpaces = try? NSRegularExpression(pattern: " {2,}", options: [])
-            let cleanedRange = NSRange(location: 0, length: cleaned.utf16.count)
-            let normalized = multipleSpaces?.stringByReplacingMatches(
-                in: cleaned,
-                options: [],
-                range: cleanedRange,
-                withTemplate: " "
-            ) ?? cleaned
+    private static func collapseLineWhitespace(_ line: String) -> String {
+        line
+            .components(separatedBy: CharacterSet.whitespaces)
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+            .trimmingCharacters(in: .whitespaces)
+    }
 
-            return normalized
-        } else {
-            let regex = try? NSRegularExpression(pattern: "[\s\t\x0B\f]+", options: [])
-            let range = NSRange(location: 0, length: string.utf16.count)
-            let normalized = regex?.stringByReplacingMatches(
-                in: string,
-                options: [],
-                range: range,
-                withTemplate: " "
-            ) ?? string
-            return normalized
+    private static func joinBioLines(_ lines: [String]) -> String {
+        var result: [String] = []
+        var previousWasEmpty = false
+
+        for line in lines {
+            let isEmpty = line.isEmpty
+            if isEmpty {
+                if previousWasEmpty {
+                    continue
+                }
+                previousWasEmpty = true
+                result.append("")
+            } else {
+                previousWasEmpty = false
+                result.append(line)
+            }
         }
+
+        while let last = result.last, last.isEmpty {
+            result.removeLast()
+        }
+
+        while let first = result.first, first.isEmpty {
+            result.removeFirst()
+        }
+
+        return result.joined(separator: "\n")
     }
 }
 
