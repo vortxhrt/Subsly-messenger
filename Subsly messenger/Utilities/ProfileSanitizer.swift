@@ -48,16 +48,70 @@ enum ProfileSanitizer {
 
     private static func collapseWhitespace(in string: String, allowNewlines: Bool = false) -> String {
         if allowNewlines {
-            let verticalWhitespace = try? NSRegularExpression(pattern: "[\t\x0B\f]+", options: [])
-            let range = NSRange(location: 0, length: string.utf16.count)
-            let cleaned = verticalWhitespace?.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: "") ?? string
-            let multipleSpaces = try? NSRegularExpression(pattern: " {2,}", options: [])
-            let cleanedRange = NSRange(location: 0, length: cleaned.utf16.count)
-            return multipleSpaces?.stringByReplacingMatches(in: cleaned, options: [], range: cleanedRange, withTemplate: " ") ?? cleaned
+            return collapseWhitespacePreservingNewlines(in: string)
         } else {
-            let regex = try? NSRegularExpression(pattern: "[\s\t\x0B\f]+", options: [])
-            let range = NSRange(location: 0, length: string.utf16.count)
-            return regex?.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: " ") ?? string
+            return collapseWhitespaceReplacingNewlines(in: string)
         }
+    }
+
+    private static func collapseWhitespacePreservingNewlines(in string: String) -> String {
+        let spaceScalar = UnicodeScalar(" ")!
+        let newlineScalar = "\n".unicodeScalars.first!
+        let newlineSet = CharacterSet.newlines
+        let verticalWhitespace = CharacterSet(charactersIn: "\t\u{000B}\u{000C}")
+
+        var scalars = String.UnicodeScalarView()
+        scalars.reserveCapacity(string.unicodeScalars.count)
+
+        var justInsertedSpace = false
+
+        for scalar in string.unicodeScalars {
+            if newlineSet.contains(scalar) {
+                scalars.append(newlineScalar)
+                justInsertedSpace = false
+                continue
+            }
+
+            if verticalWhitespace.contains(scalar) {
+                continue
+            }
+
+            if CharacterSet.whitespaces.contains(scalar) {
+                if !justInsertedSpace {
+                    scalars.append(spaceScalar)
+                    justInsertedSpace = true
+                }
+                continue
+            }
+
+            scalars.append(scalar)
+            justInsertedSpace = false
+        }
+
+        return String(scalars)
+    }
+
+    private static func collapseWhitespaceReplacingNewlines(in string: String) -> String {
+        let spaceScalar = UnicodeScalar(" ")!
+        let collapseSet = CharacterSet.whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{000B}\u{000C}"))
+
+        var scalars = String.UnicodeScalarView()
+        scalars.reserveCapacity(string.unicodeScalars.count)
+
+        var justInsertedSpace = false
+
+        for scalar in string.unicodeScalars {
+            if collapseSet.contains(scalar) {
+                if !justInsertedSpace {
+                    scalars.append(spaceScalar)
+                    justInsertedSpace = true
+                }
+            } else {
+                scalars.append(scalar)
+                justInsertedSpace = false
+            }
+        }
+
+        return String(scalars)
     }
 }
