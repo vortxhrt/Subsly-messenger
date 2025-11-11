@@ -1,9 +1,12 @@
 import SwiftUI
+import FirebaseAuth
 
 struct LoginView: View {
     @State private var email = ""
     @State private var password = ""
     @State private var errorText: String?
+    @State private var isSigningIn = false
+    @State private var lastAttemptAt: Date?
 
     var body: some View {
         NavigationStack {
@@ -14,7 +17,8 @@ struct LoginView: View {
 
                 TextField("Email", text: $email)
                     .textInputAutocapitalization(.never)
-                    .keyboardType(.emailAddress)          // <- fixed here
+                    .autocorrectionDisabled(true)
+                    .keyboardType(.emailAddress)
                     .textContentType(.emailAddress)
                     .padding()
                     .background(.thinMaterial)
@@ -33,21 +37,20 @@ struct LoginView: View {
                 }
 
                 Button {
-                    Task {
-                        do {
-                            try await AuthService.shared.signIn(email: email, password: password)
-                        } catch {
-                            errorText = error.localizedDescription
+                    attemptSignIn()
+                } label: {
+                    Group {
+                        if isSigningIn {
+                            ProgressView().frame(maxWidth: .infinity).padding()
+                        } else {
+                            Text("Sign In").frame(maxWidth: .infinity).padding()
                         }
                     }
-                } label: {
-                    Text("Sign In")
-                        .frame(maxWidth: .infinity)
-                        .padding()
-                        .background(Color.accentColor)
-                        .foregroundStyle(.white)
-                        .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .background(Color.accentColor)
+                    .foregroundStyle(.white)
+                    .clipShape(RoundedRectangle(cornerRadius: 12))
                 }
+                .disabled(isSigningIn)
 
                 NavigationLink("Create an account") {
                     RegisterView(prefilledEmail: email)
@@ -57,6 +60,64 @@ struct LoginView: View {
                 Spacer()
             }
             .padding()
+        }
+    }
+
+    private func attemptSignIn() {
+        guard !isSigningIn else { return }
+
+        let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedEmail.isEmpty, !password.isEmpty else {
+            errorText = "Email and password are required."
+            return
+        }
+
+        let now = Date()
+        if let last = lastAttemptAt, now.timeIntervalSince(last) < 2.5 {
+            errorText = "Please wait before trying again."
+            return
+        }
+        lastAttemptAt = now
+
+        isSigningIn = true
+        errorText = nil
+
+        Task {
+            do {
+                try await AuthService.shared.signIn(email: trimmedEmail, password: password)
+            } catch {
+                await MainActor.run {
+                    errorText = normalizedMessage(for: error)
+                }
+            }
+
+            await MainActor.run {
+                isSigningIn = false
+            }
+        }
+    }
+
+    private func normalizedMessage(for error: Error) -> String {
+        // Works across FirebaseAuth versions: use domain + raw numeric code.
+        guard let nsError = error as NSError?,
+              (nsError.domain == AuthErrorDomain || nsError.domain == "FIRAuthErrorDomain")
+        else {
+            return "Unable to sign in. Please double-check your details and try again."
+        }
+
+        switch nsError.code {
+        case 17009, 17004: // wrongPassword, invalidCredential
+            return "The email or password you entered is incorrect."
+        case 17010: // tooManyRequests
+            return "Sign-in is temporarily blocked due to too many attempts. Please try again later."
+        case 17008: // invalidEmail
+            return "That email address looks invalid."
+        case 17005: // userDisabled
+            return "This account has been disabled."
+        case 17020: // networkError
+            return "Network error. Please check your connection and try again."
+        default:
+            return "Unable to sign in. Please double-check your details and try again."
         }
     }
 }

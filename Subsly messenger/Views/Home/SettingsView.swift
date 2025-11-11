@@ -18,6 +18,8 @@ struct SettingsView: View {
     @State private var statusIsError = false
     @State private var bioText: String
     @State private var shareOnlineStatus: Bool
+    @State private var signOutError: String?
+    @State private var showingSignOutError = false
 
     init(currentUser: AppUser, onBackToChats: (() -> Void)? = nil) {
         self.currentUser = currentUser
@@ -41,7 +43,8 @@ struct SettingsView: View {
                 if let onBackToChats {
                     ToolbarItem(placement: .topBarLeading) {
                         Button {
-                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for
+: nil)
                             onBackToChats()
                         } label: {
                             HStack(spacing: 4) {
@@ -53,22 +56,27 @@ struct SettingsView: View {
                     }
                 }
             }
+            .alert("Sign Out Failed", isPresented: $showingSignOutError, presenting: signOutError) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { message in
+                Text(message)
+            }
         }
-        .onChange(of: session.currentUser) { _, newValue in
+        .onChange(of: session.currentUser) { newValue in
             if let updated = newValue {
                 workingUser = updated
                 bioText = updated.bio ?? ""
                 shareOnlineStatus = updated.shareOnlineStatus
             }
         }
-        .onChange(of: pickerItem) { _, newItem in
+        .onChange(of: pickerItem) { newItem in
             guard let newItem else { return }
             Task { await processSelection(newItem) }
         }
-        .onChange(of: bioText) { _, newValue in
+        .onChange(of: bioText) { newValue in
             enforceBioLimit(for: newValue)
         }
-        .onChange(of: shareOnlineStatus) { _, newValue in
+        .onChange(of: shareOnlineStatus) { newValue in
             guard workingUser.shareOnlineStatus != newValue else { return }
             Task { await updatePresencePreference(to: newValue) }
         }
@@ -192,11 +200,7 @@ struct SettingsView: View {
     private var accountSection: some View {
         Section("Account") {
             Button(role: .destructive) {
-                do {
-                    try AuthService.shared.signOut()
-                } catch {
-                    print("Sign out failed:", error)
-                }
+                Task { await handleSignOut() }
             } label: {
                 Text("Sign Out")
                     .frame(maxWidth: .infinity, alignment: .center)
@@ -252,9 +256,14 @@ struct SettingsView: View {
         } catch {
             await MainActor.run {
                 if let avatarError = error as? AvatarServiceError {
-                    statusMessage = "Couldn't process the selected image."
+                    switch avatarError {
+                    case .imageEncodingFailed:
+                        statusMessage = "Couldn't process the selected image."
+                    case .imageTooLarge:
+                        statusMessage = "Please choose a smaller image (under 5 MB)."
+                    }
                 } else {
-                    statusMessage = error.localizedDescription
+                    statusMessage = "We couldn’t update your photo. Please try again."
                 }
                 statusIsError = true
             }
@@ -309,7 +318,7 @@ struct SettingsView: View {
             }
         } catch {
             await MainActor.run {
-                statusMessage = error.localizedDescription
+                statusMessage = "We couldn’t save your profile. Please try again."
                 statusIsError = true
             }
         }
@@ -356,7 +365,7 @@ struct SettingsView: View {
             }
         } catch {
             await MainActor.run {
-                statusMessage = error.localizedDescription
+                statusMessage = "We couldn’t update this preference right now."
                 statusIsError = true
                 shareOnlineStatus = workingUser.shareOnlineStatus
             }
@@ -374,6 +383,17 @@ struct SettingsView: View {
         let renderer = UIGraphicsImageRenderer(size: newSize)
         return renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: newSize))
+        }
+    }
+
+    private func handleSignOut() async {
+        do {
+            try await AuthService.shared.signOut()
+        } catch {
+            await MainActor.run {
+                signOutError = "We couldn’t sign you out. Please try again."
+                showingSignOutError = true
+            }
         }
     }
 }

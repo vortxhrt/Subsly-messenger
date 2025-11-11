@@ -17,7 +17,7 @@ struct SubslyApp: App {
                 .environmentObject(threadsStore)
                 .environmentObject(usersStore)
         }
-        .onChange(of: scenePhase) { _, newPhase in
+        .onChange(of: scenePhase) { newPhase in
             Task {
                 switch newPhase {
                 case .active:

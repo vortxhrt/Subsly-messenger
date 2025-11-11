@@ -105,6 +105,11 @@ actor UserService {
             .setData(["fcmToken": token], merge: true)
     }
 
+    func clearFCMToken(uid: String) async throws {
+        try await db.collection("users").document(uid)
+            .setData(["fcmToken": FieldValue.delete()], merge: true)
+    }
+
     func updateProfile(uid: String, displayName: String, bio: String?) async throws {
         var payload: [String: Any] = [
             "displayName": displayName,
@@ -139,5 +144,13 @@ actor UserService {
             payload["lastOnlineAt"] = FieldValue.serverTimestamp()
         }
         try await db.collection("users").document(uid).setData(payload, merge: true)
+    }
+
+    func handleExists(handleLower: String) async throws -> Bool {
+        let snapshot = try await db.collection("users")
+            .whereField("handleLower", isEqualTo: handleLower)
+            .limit(to: 1)
+            .getDocuments()
+        return !snapshot.documents.isEmpty
     }
 }

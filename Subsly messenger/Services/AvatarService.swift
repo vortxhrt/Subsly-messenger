@@ -4,6 +4,7 @@ import UIKit
 
 enum AvatarServiceError: Error {
     case imageEncodingFailed
+    case imageTooLarge
 }
 
 actor AvatarService {
@@ -12,6 +13,10 @@ actor AvatarService {
     func upload(image: UIImage, for uid: String) async throws -> String {
         guard let data = image.jpegData(compressionQuality: 0.8) else {
             throw AvatarServiceError.imageEncodingFailed
+        }
+
+        guard data.count <= 5 * 1024 * 1024 else {
+            throw AvatarServiceError.imageTooLarge
         }
 
         let storage = Storage.storage()
