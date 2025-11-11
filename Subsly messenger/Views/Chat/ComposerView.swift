@@ -86,7 +86,7 @@ struct ComposerView: View {
                         )
                 }
                 .disabled(isProcessingAttachment || attachments.count >= attachmentLimit)
-                .onChange(of: pickerItems) { _, newValue in
+                .onChange(of: pickerItems) { newValue in
                     guard !newValue.isEmpty else { return }
                     onPickAttachments(newValue)
                     pickerItems = []
@@ -116,7 +116,7 @@ struct ComposerView: View {
                         .disableAutocorrection(false)
                         .focused($isFocused)
                         .padding(.vertical, 6) // tight vertical like WhatsApp
-                        .onChange(of: text) { _, newValue in
+                        .onChange(of: text) { newValue in
                             let trimmed = newValue.trimmingCharacters(in: .whitespacesAndNewlines)
                             onTyping(!trimmed.isEmpty)
 

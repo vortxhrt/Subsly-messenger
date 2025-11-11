@@ -61,21 +61,21 @@ struct SettingsView: View {
                 Text(message)
             }
         }
-        .onChange(of: session.currentUser) { _, newValue in
+        .onChange(of: session.currentUser) { newValue in
             if let updated = newValue {
                 workingUser = updated
                 bioText = updated.bio ?? ""
                 shareOnlineStatus = updated.shareOnlineStatus
             }
         }
-        .onChange(of: pickerItem) { _, newItem in
+        .onChange(of: pickerItem) { newItem in
             guard let newItem else { return }
             Task { await processSelection(newItem) }
         }
-        .onChange(of: bioText) { _, newValue in
+        .onChange(of: bioText) { newValue in
             enforceBioLimit(for: newValue)
         }
-        .onChange(of: shareOnlineStatus) { _, newValue in
+        .onChange(of: shareOnlineStatus) { newValue in
             guard workingUser.shareOnlineStatus != newValue else { return }
             Task { await updatePresencePreference(to: newValue) }
         }

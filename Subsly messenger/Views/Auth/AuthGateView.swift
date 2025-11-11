@@ -25,7 +25,7 @@ struct AuthGateView: View {
         }
         .animation(.easeInOut(duration: 0.25), value: session.isLoading)
         .animation(.easeInOut(duration: 0.25), value: session.currentUser?.id)
-        .onChange(of: session.currentUser?.id) { _, newId in
+        .onChange(of: session.currentUser?.id) { newId in
             guard newId != nil else { return }
             Task { await session.setPresence(isOnline: true) }
         }

@@ -140,14 +140,14 @@ struct ThreadView: View {
                 .background(Color(.systemGroupedBackground))
 
                 // Keep bottom pinned and wire receipts whenever messages change.
-                .onChange(of: messages) { _, newMessages in
+                .onChange(of: messages) { newMessages in
                     handleMessagesChange(newMessages, proxy: proxy)
                 }
-                .onChange(of: isOtherTyping) { _, _ in
+                .onChange(of: isOtherTyping) { _ in
                     guard !isLoadingMore else { return }
                     scheduleBottomScroll(proxy: proxy, animated: true)
                 }
-                .onChange(of: composerHeight) { _, _ in
+                .onChange(of: composerHeight) { _ in
                     guard hasPerformedInitialScroll else { return }
                     scheduleBottomScroll(proxy: proxy, animated: false)
                 }
