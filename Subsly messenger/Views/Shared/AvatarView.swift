@@ -6,10 +6,20 @@ struct AvatarView: View {
         let isVisible: Bool
     }
 
+    struct StatusIndicatorStyle {
+        let scale: CGFloat
+        let minimumSize: CGFloat
+        let strokeRatio: CGFloat
+
+        static let standard = StatusIndicatorStyle(scale: 0.32, minimumSize: 12, strokeRatio: 0.15)
+        static let compact = StatusIndicatorStyle(scale: 0.16, minimumSize: 6, strokeRatio: 0.2)
+    }
+
     let avatarURL: String?
     let name: String
     var size: CGFloat = 40
     var status: OnlineStatus? = nil
+    var statusIndicatorStyle: StatusIndicatorStyle = .standard
 
     private var initials: String {
         let components = name
@@ -40,7 +50,7 @@ struct AvatarView: View {
     }
 
     private var indicatorSize: CGFloat {
-        max(12, size * 0.32)
+        max(statusIndicatorStyle.minimumSize, size * statusIndicatorStyle.scale)
     }
 
     var body: some View {
@@ -53,16 +63,16 @@ struct AvatarView: View {
                 )
                 .accessibilityHidden(true)
 
-            if let status, status.isVisible {
+            if let status, status.isVisible, status.isOnline {
                 Circle()
-                    .fill(status.isOnline ? Color.green : Color.gray)
+                    .fill(Color.green)
                     .frame(width: indicatorSize, height: indicatorSize)
                     .overlay(
                         Circle()
-                            .stroke(Color(.systemBackground), lineWidth: max(1, indicatorSize * 0.15))
+                            .stroke(Color(.systemBackground), lineWidth: max(1, indicatorSize * statusIndicatorStyle.strokeRatio))
                     )
-                    .offset(x: indicatorSize * 0.15, y: indicatorSize * 0.15)
-                    .accessibilityLabel(status.isOnline ? "Online" : "Offline")
+                    .offset(x: indicatorSize * statusIndicatorStyle.strokeRatio, y: indicatorSize * statusIndicatorStyle.strokeRatio)
+                    .accessibilityLabel("Online")
             }
         }
     }

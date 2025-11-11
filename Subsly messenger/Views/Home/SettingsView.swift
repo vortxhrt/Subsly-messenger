@@ -84,7 +84,8 @@ struct SettingsView: View {
                     status: AvatarView.OnlineStatus(
                         isOnline: workingUser.isOnline,
                         isVisible: workingUser.shareOnlineStatus
-                    )
+                    ),
+                    statusIndicatorStyle: .compact
                 )
                 .frame(maxWidth: .infinity)
 
