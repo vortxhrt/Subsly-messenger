@@ -5,6 +5,7 @@ import FirebaseFirestore
 actor UserService {
     static let shared = UserService()
     private var db: Firestore { Firestore.firestore() }
+    private let maxBioLength = 160
 
     // Create or update profile on sign-up
     func createUserProfile(uid: String,
@@ -12,10 +13,12 @@ actor UserService {
                            displayName: String,
                            avatarURL: String? = nil,
                            bio: String? = nil) async throws {
+        let sanitizedDisplayName = ProfileSanitizer.sanitizeDisplayName(displayName, fallback: handle)
+        let sanitizedBio = ProfileSanitizer.sanitizeBio(bio)
         var payload: [String: Any] = [
             "handle": handle,
             "handleLower": handle.lowercased(),
-            "displayName": displayName,
+            "displayName": sanitizedDisplayName,
             "createdAt": FieldValue.serverTimestamp(),
             "shareOnlineStatus": true,
             "isOnline": false
@@ -23,8 +26,8 @@ actor UserService {
         if let avatarURL, !avatarURL.isEmpty {
             payload["avatarURL"] = avatarURL
         }
-        if let bio, !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            payload["bio"] = bio
+        if let sanitizedBio {
+            payload["bio"] = sanitizedBio
         }
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
@@ -44,10 +47,11 @@ actor UserService {
     // Build AppUser on main actor (avoids MainActor initializer warnings)
     private func mapUser(id: String, data: [String: Any]) async -> AppUser {
         let handle = (data["handle"] as? String) ?? "user\(id.prefix(6))"
-        let displayName = (data["displayName"] as? String) ?? handle
+        let displayNameRaw = (data["displayName"] as? String) ?? handle
+        let displayName = ProfileSanitizer.sanitizeDisplayName(displayNameRaw, fallback: handle)
         let avatarURL = data["avatarURL"] as? String
         let createdAt = (data["createdAt"] as? Timestamp)?.dateValue()
-        let bio = data["bio"] as? String
+        let bio = ProfileSanitizer.sanitizeBio(data["bio"] as? String, limit: maxBioLength)
         let isOnline = data["isOnline"] as? Bool ?? false
         let shareOnlineStatus = data["shareOnlineStatus"] as? Bool ?? true
         let lastOnlineAt = (data["lastOnlineAt"] as? Timestamp)?.dateValue()
@@ -101,23 +105,41 @@ actor UserService {
 
     // Save the current user's FCM token in their Firestore document
     func saveFCMToken(uid: String, token: String) async throws {
-        try await db.collection("users").document(uid)
-            .setData(["fcmToken": token], merge: true)
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let tokenId = TokenHasher.hash(trimmed)
+        try await db.collection("users")
+            .document(uid)
+            .collection("deviceTokens")
+            .document(tokenId)
+            .setData([
+                "token": trimmed,
+                "platform": "ios",
+                "updatedAt": FieldValue.serverTimestamp()
+            ], merge: true)
     }
 
-    func clearFCMToken(uid: String) async throws {
-        try await db.collection("users").document(uid)
-            .setData(["fcmToken": FieldValue.delete()], merge: true)
+    func removeFCMToken(uid: String, token: String) async throws {
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let tokenId = TokenHasher.hash(trimmed)
+        try await db.collection("users")
+            .document(uid)
+            .collection("deviceTokens")
+            .document(tokenId)
+            .delete()
     }
 
     func updateProfile(uid: String, displayName: String, bio: String?) async throws {
+        let sanitizedName = ProfileSanitizer.sanitizeDisplayName(displayName, fallback: displayName)
+        let sanitizedBio = ProfileSanitizer.sanitizeBio(bio)
         var payload: [String: Any] = [
-            "displayName": displayName,
+            "displayName": sanitizedName,
             "updatedAt": FieldValue.serverTimestamp()
         ]
 
-        if let bio, !bio.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            payload["bio"] = bio
+        if let sanitizedBio {
+            payload["bio"] = sanitizedBio
         } else {
             payload["bio"] = FieldValue.delete()
         }

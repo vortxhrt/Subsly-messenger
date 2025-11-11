@@ -17,6 +17,7 @@ actor MediaCache {
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
+        applyFileProtectionIfAvailable(to: directory)
         directoryURL = directory
     }
 
@@ -51,13 +52,29 @@ actor MediaCache {
         if !fileManager.fileExists(atPath: directoryURL.path) {
             try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
         }
+        applyFileProtectionIfAvailable(to: directoryURL)
         do {
-            try data.write(to: path, options: .atomic)
+            try data.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            applyFileProtectionIfAvailable(to: path)
         } catch {
             #if DEBUG
             print("MediaCache disk write failed for \(url):", error.localizedDescription)
             #endif
         }
+    }
+
+    private func applyFileProtectionIfAvailable(to url: URL) {
+        #if os(iOS)
+        do {
+            try fileManager.setAttributes([
+                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
+            ], ofItemAtPath: url.path)
+        } catch {
+            #if DEBUG
+            print("Failed to apply file protection to \(url.lastPathComponent):", error.localizedDescription)
+            #endif
+        }
+        #endif
     }
 
     func data(for url: URL) async throws -> Data {

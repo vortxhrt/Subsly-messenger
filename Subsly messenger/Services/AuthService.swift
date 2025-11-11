@@ -1,14 +1,18 @@
 // Subsly messenger/Services/AuthService.swift
 import Foundation
 import FirebaseAuth
+import FirebaseMessaging
 
 enum AuthServiceError: LocalizedError {
     case missingAuthenticatedUser
+    case invalidEmail
 
     var errorDescription: String? {
         switch self {
         case .missingAuthenticatedUser:
             return "No authenticated user is available for this operation."
+        case .invalidEmail:
+            return "The provided email address is invalid."
         }
     }
 }
@@ -18,11 +22,17 @@ actor AuthService {
 
     func signIn(email: String, password: String) async throws {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard EmailValidator.isValid(trimmedEmail) else {
+            throw AuthServiceError.invalidEmail
+        }
         _ = try await Auth.auth().signIn(withEmail: trimmedEmail, password: password)
     }
 
     func signUp(email: String, password: String) async throws {
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard EmailValidator.isValid(trimmedEmail) else {
+            throw AuthServiceError.invalidEmail
+        }
         let result = try await Auth.auth().createUser(withEmail: trimmedEmail, password: password)
         let uid = result.user.uid
 
@@ -72,7 +82,9 @@ actor AuthService {
     func signOut() async throws {
         if let uid = Auth.auth().currentUser?.uid {
             do {
-                try await UserService.shared.clearFCMToken(uid: uid)
+                if let token = Messaging.messaging().fcmToken {
+                    try await UserService.shared.removeFCMToken(uid: uid, token: token)
+                }
             } catch {
                 print("Clearing push token on sign-out failed.")
             }

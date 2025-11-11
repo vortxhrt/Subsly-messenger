@@ -22,11 +22,14 @@ struct SettingsView: View {
     @State private var showingSignOutError = false
 
     init(currentUser: AppUser, onBackToChats: (() -> Void)? = nil) {
-        self.currentUser = currentUser
+        var sanitizedUser = currentUser
+        sanitizedUser.displayName = ProfileSanitizer.sanitizeDisplayName(currentUser.displayName, fallback: currentUser.handle)
+        sanitizedUser.bio = ProfileSanitizer.sanitizeBio(currentUser.bio, limit: 160)
+        self.currentUser = sanitizedUser
         self.onBackToChats = onBackToChats
-        _workingUser = State(initialValue: currentUser)
-        _bioText = State(initialValue: currentUser.bio ?? "")
-        _shareOnlineStatus = State(initialValue: currentUser.shareOnlineStatus)
+        _workingUser = State(initialValue: sanitizedUser)
+        _bioText = State(initialValue: sanitizedUser.bio ?? "")
+        _shareOnlineStatus = State(initialValue: sanitizedUser.shareOnlineStatus)
     }
 
     var body: some View {
@@ -64,9 +67,12 @@ struct SettingsView: View {
         }
         .onChange(of: session.currentUser) { newValue in
             if let updated = newValue {
-                workingUser = updated
-                bioText = updated.bio ?? ""
-                shareOnlineStatus = updated.shareOnlineStatus
+                var sanitized = updated
+                sanitized.displayName = ProfileSanitizer.sanitizeDisplayName(updated.displayName, fallback: updated.handle)
+                sanitized.bio = ProfileSanitizer.sanitizeBio(updated.bio, limit: bioLimit)
+                workingUser = sanitized
+                bioText = sanitized.bio ?? ""
+                shareOnlineStatus = sanitized.shareOnlineStatus
             }
         }
         .onChange(of: pickerItem) { newItem in
@@ -216,9 +222,9 @@ struct SettingsView: View {
     private var bioLimit: Int { 160 }
 
     private var profileHasChanges: Bool {
-        let trimmedBio = bioText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let currentBio = workingUser.bio?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        return trimmedBio != currentBio
+        let normalizedDraft = ProfileSanitizer.sanitizeBio(bioText, limit: bioLimit) ?? ""
+        let currentBio = ProfileSanitizer.sanitizeBio(workingUser.bio, limit: bioLimit) ?? ""
+        return normalizedDraft != currentBio
     }
 
     private func processSelection(_ item: PhotosPickerItem) async {
@@ -276,8 +282,9 @@ struct SettingsView: View {
     }
 
     private func enforceBioLimit(for value: String) {
-        if value.count > bioLimit {
-            bioText = String(value.prefix(bioLimit))
+        let normalized = ProfileSanitizer.normalizeBioDraft(value, limit: bioLimit)
+        if normalized != value {
+            bioText = normalized
         }
     }
 
@@ -291,7 +298,8 @@ struct SettingsView: View {
             return
         }
 
-        let trimmedBio = bioText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let sanitizedName = ProfileSanitizer.sanitizeDisplayName(workingUser.displayName, fallback: workingUser.handle)
+        let sanitizedBio = ProfileSanitizer.sanitizeBio(bioText, limit: bioLimit)
 
         await MainActor.run {
             isSavingProfile = true
@@ -302,13 +310,14 @@ struct SettingsView: View {
         do {
             try await UserService.shared.updateProfile(
                 uid: uid,
-                displayName: workingUser.displayName,
-                bio: trimmedBio.isEmpty ? nil : trimmedBio
+                displayName: sanitizedName,
+                bio: sanitizedBio
             )
 
             await MainActor.run {
-                workingUser.bio = trimmedBio.isEmpty ? nil : trimmedBio
-                bioText = trimmedBio
+                workingUser.displayName = sanitizedName
+                workingUser.bio = sanitizedBio
+                bioText = sanitizedBio ?? ""
                 var updatedUser = workingUser
                 updatedUser.id = uid
                 session.currentUser = updatedUser
