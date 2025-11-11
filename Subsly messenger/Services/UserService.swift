@@ -1,5 +1,7 @@
 import Foundation
+#if canImport(CryptoKit)
 import CryptoKit
+#endif
 import FirebaseAuth
 import FirebaseFirestore
 
@@ -181,45 +183,60 @@ actor UserService {
 // MARK: - Helpers
 
 enum ProfileSanitizer {
-    private static let disallowedDisplayCharacters: CharacterSet = {
-        var set = CharacterSet.controlCharacters
-        set.remove(charactersIn: " ")
-        return set
-    }()
-
-    private static let disallowedBioCharacters: CharacterSet = {
-        var set = CharacterSet.controlCharacters
-        set.remove(charactersIn: "\n")
-        return set
-    }()
-
     static func sanitizeDisplayName(_ name: String, fallback: String) -> String {
-        let cleaned = removeCharacters(from: name, disallowedSet: disallowedDisplayCharacters)
-        let collapsed = collapseWhitespace(cleaned)
+        let filtered = filterControlCharacters(in: name, allowNewlines: false)
+        let collapsed = collapseWhitespace(filtered)
         let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
         let capped = String(trimmed.prefix(50))
 
-        let fallbackCleaned = collapseWhitespace(fallback).trimmingCharacters(in: .whitespacesAndNewlines)
-        let fallbackValue = fallbackCleaned.isEmpty ? "User" : fallbackCleaned
+        let fallbackCollapsed = collapseWhitespace(fallback).trimmingCharacters(in: .whitespacesAndNewlines)
+        let fallbackValue = fallbackCollapsed.isEmpty ? "User" : fallbackCollapsed
         return capped.isEmpty ? String(fallbackValue.prefix(50)) : capped
     }
 
     static func sanitizeBio(_ bio: String?, limit: Int = 160) -> String? {
         guard let bio else { return nil }
-        let cleaned = removeCharacters(from: bio, disallowedSet: disallowedBioCharacters)
-        let normalizedLines = cleaned.components(separatedBy: .newlines).map { collapseLineWhitespace($0) }
-        let collapsed = joinBioLines(normalizedLines)
-        let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        let filtered = filterControlCharacters(in: bio, allowNewlines: true)
+        let normalizedNewlines = filtered
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        let collapsedLines = normalizedNewlines
+            .components(separatedBy: "\n")
+            .map { collapseInlineWhitespace($0) }
+        let cleaned = trimEmptyLines(from: collapsedLines).joined(separator: "\n")
+        let trimmed = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
         return String(trimmed.prefix(limit))
     }
 
     static func normalizeBioDraft(_ draft: String, limit: Int) -> String {
-        sanitizeBio(draft, limit: limit) ?? ""
+        let filtered = filterControlCharacters(in: draft, allowNewlines: true)
+        if filtered.count <= limit { return filtered }
+        let endIndex = filtered.index(filtered.startIndex, offsetBy: limit)
+        return String(filtered[..<endIndex])
     }
 
-    private static func removeCharacters(from string: String, disallowedSet: CharacterSet) -> String {
-        let scalars = string.unicodeScalars.filter { !disallowedSet.contains($0) }
+    private static func filterControlCharacters(in string: String, allowNewlines: Bool) -> String {
+        let newline = UnicodeScalar(10)
+        let carriageReturn = UnicodeScalar(13)
+
+        var scalars: [UnicodeScalar] = []
+        scalars.reserveCapacity(string.unicodeScalars.count)
+
+        for scalar in string.unicodeScalars {
+            if CharacterSet.controlCharacters.contains(scalar) {
+                if allowNewlines {
+                    if scalar == newline {
+                        scalars.append(scalar)
+                    } else if scalar == carriageReturn {
+                        scalars.append(newline)
+                    }
+                }
+                continue
+            }
+            scalars.append(scalar)
+        }
+
         return String(String.UnicodeScalarView(scalars))
     }
 
@@ -230,48 +247,52 @@ enum ProfileSanitizer {
             .joined(separator: " ")
     }
 
-    private static func collapseLineWhitespace(_ line: String) -> String {
+    private static func collapseInlineWhitespace(_ line: String) -> String {
         line
-            .components(separatedBy: CharacterSet.whitespaces)
+            .components(separatedBy: CharacterSet.whitespacesAndNewlines)
             .filter { !$0.isEmpty }
             .joined(separator: " ")
-            .trimmingCharacters(in: .whitespaces)
     }
 
-    private static func joinBioLines(_ lines: [String]) -> String {
-        var result: [String] = []
-        var previousWasEmpty = false
-
-        for line in lines {
-            let isEmpty = line.isEmpty
-            if isEmpty {
-                if previousWasEmpty {
-                    continue
-                }
-                previousWasEmpty = true
-                result.append("")
-            } else {
-                previousWasEmpty = false
-                result.append(line)
-            }
+    private static func trimEmptyLines(from lines: [String]) -> [String] {
+        var result = lines
+        while let first = result.first, first.isEmpty {
+            result.removeFirst()
         }
-
         while let last = result.last, last.isEmpty {
             result.removeLast()
         }
 
-        while let first = result.first, first.isEmpty {
-            result.removeFirst()
+        var collapsed: [String] = []
+        var previousEmpty = false
+        for line in result {
+            if line.isEmpty {
+                if previousEmpty { continue }
+                previousEmpty = true
+                collapsed.append("")
+            } else {
+                previousEmpty = false
+                collapsed.append(line)
+            }
         }
-
-        return result.joined(separator: "\n")
+        return collapsed
     }
 }
 
 enum TokenHasher {
     static func hash(_ token: String) -> String {
+        #if canImport(CryptoKit)
         let data = Data(token.utf8)
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+        #else
+        var hash: UInt64 = 0xcbf29ce484222325 // FNV-1a 64-bit offset basis
+        let prime: UInt64 = 0x100000001b3
+        for byte in token.utf8 {
+            hash ^= UInt64(byte)
+            hash = hash &* prime
+        }
+        return String(format: "%016llx", hash)
+        #endif
     }
 }
