@@ -67,7 +67,12 @@ struct LoginView: View {
         guard !isSigningIn else { return }
 
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedEmail.isEmpty, !password.isEmpty else {
+        guard EmailValidator.isValid(trimmedEmail) else {
+            errorText = "Enter a valid email address."
+            return
+        }
+
+        guard !password.isEmpty else {
             errorText = "Email and password are required."
             return
         }
@@ -87,7 +92,16 @@ struct LoginView: View {
                 try await AuthService.shared.signIn(email: trimmedEmail, password: password)
             } catch {
                 await MainActor.run {
-                    errorText = normalizedMessage(for: error)
+                    if let serviceError = error as? AuthServiceError {
+                        switch serviceError {
+                        case .invalidEmail:
+                            errorText = "Enter a valid email address."
+                        case .missingAuthenticatedUser:
+                            errorText = normalizedMessage(for: error)
+                        }
+                    } else {
+                        errorText = normalizedMessage(for: error)
+                    }
                 }
             }
 

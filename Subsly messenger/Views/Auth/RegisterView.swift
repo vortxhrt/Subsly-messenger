@@ -68,7 +68,7 @@ struct RegisterView: View {
         guard !isRegistering else { return }
 
         let trimmedEmail = email.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmedEmail.contains("@"), trimmedEmail.contains(".") else {
+        guard EmailValidator.isValid(trimmedEmail) else {
             errorText = "Enter a valid email address."
             return
         }
@@ -98,7 +98,16 @@ struct RegisterView: View {
                 try await AuthService.shared.signUp(email: trimmedEmail, password: password)
             } catch {
                 await MainActor.run {
-                    errorText = normalizedMessage(for: error)
+                    if let serviceError = error as? AuthServiceError {
+                        switch serviceError {
+                        case .invalidEmail:
+                            errorText = "Enter a valid email address."
+                        case .missingAuthenticatedUser:
+                            errorText = normalizedMessage(for: error)
+                        }
+                    } else {
+                        errorText = normalizedMessage(for: error)
+                    }
                 }
             }
 
