@@ -8,6 +8,8 @@ struct AuthGateView: View {
         Group {
             if session.isLoading {
                 ProgressView("Loading…")
+            } else if let email = session.pendingEmailVerification {
+                EmailVerificationView(email: email)
             } else if let user = session.currentUser, let uid = user.id {
                 HomeView(currentUser: user)
                     .onAppear {

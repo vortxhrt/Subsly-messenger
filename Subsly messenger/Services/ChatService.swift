@@ -2,6 +2,66 @@ import Foundation
 import FirebaseCore
 import FirebaseFirestore
 
+enum ChatServiceError: LocalizedError {
+    case notThreadMember
+    case threadUnavailable
+    case emptyMessage
+    case textTooLong
+    case tooManyAttachments
+    case attachmentValidationFailed
+
+    var errorDescription: String? {
+        switch self {
+        case .notThreadMember:
+            return "You’re no longer a member of this conversation."
+        case .threadUnavailable:
+            return "This conversation is unavailable."
+        case .emptyMessage:
+            return "Messages must include text or an attachment."
+        case .textTooLong:
+            return "Messages are limited to 4,000 characters."
+        case .tooManyAttachments:
+            return "You can attach up to 20 items per message."
+        case .attachmentValidationFailed:
+            return "One of the attachments could not be processed."
+        }
+    }
+}
+
+// MARK: - Validations
+private let maxAttachmentCount = 20
+private let maxImageBytes = 6 * 1024 * 1024
+private let maxVideoBytes: Int64 = Int64(40 * 1024 * 1024)
+private let maxVideoDuration: Double = 180
+
+private func validateAttachments(_ attachments: [PendingAttachment]) throws {
+    guard attachments.count <= maxAttachmentCount else {
+        throw ChatServiceError.tooManyAttachments
+    }
+
+    for attachment in attachments {
+        switch attachment.kind {
+        case .image(let data, let width, let height):
+            guard width > 0, height > 0, data.count <= maxImageBytes else {
+                throw ChatServiceError.attachmentValidationFailed
+            }
+        case .video(let fileURL, _, let width, let height, let duration):
+            guard width > 0, height > 0, duration <= maxVideoDuration else {
+                throw ChatServiceError.attachmentValidationFailed
+            }
+
+            do {
+                let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                if let size = attributes[.size] as? NSNumber, size.int64Value > maxVideoBytes {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+            } catch {
+                throw ChatServiceError.attachmentValidationFailed
+            }
+        }
+    }
+}
+
 // ListenerRegistration is @MainActor, so make this class @MainActor too.
 @MainActor
 final class DummyListener: NSObject, ListenerRegistration {
@@ -49,10 +109,37 @@ actor ChatService {
             print("✈️ Offline/local mode: not sending message.")
             return
         }
+
+        try validateAttachments(attachments)
+
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedText.isEmpty || !attachments.isEmpty else {
+            throw ChatServiceError.emptyMessage
+        }
+        if trimmedText.count > 4000 {
+            throw ChatServiceError.textTooLong
+        }
+
+        let threadDocument: DocumentSnapshot
+        do {
+            threadDocument = try await threadsCol.document(threadId).getDocument()
+        } catch {
+            throw ChatServiceError.threadUnavailable
+        }
+
+        guard threadDocument.exists else {
+            throw ChatServiceError.threadUnavailable
+        }
+
+        let members = threadDocument.data()?["members"] as? [String] ?? []
+        guard members.contains(senderId) else {
+            throw ChatServiceError.notThreadMember
+        }
+
         let msgRef = threadsCol.document(threadId).collection("messages").document()
         var payload: [String: Any] = [
             "senderId": senderId,
-            "text": text,
+            "text": trimmedText,
             "clientMessageId": clientMessageId,
             "createdAt": FieldValue.serverTimestamp()
         ]
@@ -97,8 +184,8 @@ actor ChatService {
         try await msgRef.setData(payload, merge: true)
 
         let previewText: String
-        if !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            previewText = text
+        if !trimmedText.isEmpty {
+            previewText = trimmedText
         } else if !uploadedAttachments.isEmpty {
             if uploadedAttachments.count == 1, let first = uploadedAttachments.first {
                 previewText = first.previewText

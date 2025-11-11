@@ -23,7 +23,9 @@ final class ReceiptsService {
             do {
                 try await ref.setData(["deliveredTo": [uid]], merge: true)
             } catch {
+                #if DEBUG
                 print("⚠️ markDelivered failed: \(error.localizedDescription)")
+                #endif
             }
         }
     }
@@ -44,7 +46,9 @@ final class ReceiptsService {
                     "deliveredTo": [uid]
                 ], merge: true)
             } catch {
+                #if DEBUG
                 print("⚠️ markRead failed: \(error.localizedDescription)")
+                #endif
             }
         }
     }
