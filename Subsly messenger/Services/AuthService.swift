@@ -122,14 +122,13 @@ actor AuthService {
 // MARK: - Helpers
 
 enum EmailValidator {
-    private static let detector: NSDataDetector? = {
-        try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
-    }()
-
     static func isValid(_ email: String) -> Bool {
         let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed.count <= 254 else { return false }
-        guard let detector else { return false }
+
+        guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+            return false
+        }
 
         let nsRange = NSRange(location: 0, length: trimmed.utf16.count)
         let matches = detector.matches(in: trimmed, options: [], range: nsRange)
