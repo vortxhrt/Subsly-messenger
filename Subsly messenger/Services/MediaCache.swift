@@ -54,7 +54,7 @@ actor MediaCache {
         }
         applyFileProtectionIfAvailable(to: directoryURL)
         do {
-            try data.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+            try data.write(to: path, options: [.atomic])
             applyFileProtectionIfAvailable(to: path)
         } catch {
             #if DEBUG

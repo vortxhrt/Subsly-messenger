@@ -230,15 +230,32 @@ enum ProfileSanitizer {
         if allowNewlines {
             let verticalWhitespace = try? NSRegularExpression(pattern: "[\t\x0B\f]+", options: [])
             let range = NSRange(location: 0, length: string.utf16.count)
-            let cleaned = verticalWhitespace?.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: "") ?? string
+            let cleaned = verticalWhitespace?.stringByReplacingMatches(
+                in: string,
+                options: [],
+                range: range,
+                withTemplate: ""
+            ) ?? string
+
             let multipleSpaces = try? NSRegularExpression(pattern: " {2,}", options: [])
             let cleanedRange = NSRange(location: 0, length: cleaned.utf16.count)
-            let normalized = multipleSpaces?.stringByReplacingMatches(in: cleaned, options: [], range: cleanedRange, withTemplate: " ") ?? cleaned
+            let normalized = multipleSpaces?.stringByReplacingMatches(
+                in: cleaned,
+                options: [],
+                range: cleanedRange,
+                withTemplate: " "
+            ) ?? cleaned
+
             return normalized
         } else {
             let regex = try? NSRegularExpression(pattern: "[\s\t\x0B\f]+", options: [])
             let range = NSRange(location: 0, length: string.utf16.count)
-            let normalized = regex?.stringByReplacingMatches(in: string, options: [], range: range, withTemplate: " ") ?? string
+            let normalized = regex?.stringByReplacingMatches(
+                in: string,
+                options: [],
+                range: range,
+                withTemplate: " "
+            ) ?? string
             return normalized
         }
     }
