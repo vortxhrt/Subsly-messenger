@@ -56,6 +56,8 @@ struct ThreadView: View {
     @State private var attachmentTask: Task<Void, Never>?
     @State private var attachmentErrorMessage: String?
     @State private var showingAttachmentError = false
+    @State private var sendErrorMessage: String?
+    @State private var showingSendError = false
     @State private var mediaViewer: MediaViewerPayload?
 
     @State private var composerHeight: CGFloat = 72
@@ -138,14 +140,14 @@ struct ThreadView: View {
                 .background(Color(.systemGroupedBackground))
 
                 // Keep bottom pinned and wire receipts whenever messages change.
-                .onChange(of: messages) { _, newMessages in
+                .onChange(of: messages) { newMessages in
                     handleMessagesChange(newMessages, proxy: proxy)
                 }
-                .onChange(of: isOtherTyping) { _, _ in
+                .onChange(of: isOtherTyping) { _ in
                     guard !isLoadingMore else { return }
                     scheduleBottomScroll(proxy: proxy, animated: true)
                 }
-                .onChange(of: composerHeight) { _, _ in
+                .onChange(of: composerHeight) { _ in
                     guard hasPerformedInitialScroll else { return }
                     scheduleBottomScroll(proxy: proxy, animated: false)
                 }
@@ -229,6 +231,11 @@ struct ThreadView: View {
                 UserProfileView(userId: otherUID)
             }
             .alert("Attachment Error", isPresented: $showingAttachmentError, presenting: attachmentErrorMessage) { _ in
+                Button("OK", role: .cancel) {}
+            } message: { message in
+                Text(message)
+            }
+            .alert("Message Not Sent", isPresented: $showingSendError, presenting: sendErrorMessage) { _ in
                 Button("OK", role: .cancel) {}
             } message: { message in
                 Text(message)
@@ -441,7 +448,14 @@ struct ThreadView: View {
                         try? FileManager.default.removeItem(at: url)
                     }
                 }
-                print("Send message failed: \(error.localizedDescription)")
+                await MainActor.run {
+                    if let chatError = error as? ChatServiceError {
+                        sendErrorMessage = chatError.localizedDescription
+                    } else {
+                        sendErrorMessage = "We couldn’t send your message. Please try again."
+                    }
+                    showingSendError = true
+                }
                 await MainActor.run {
                     self.pendingOutgoingIDs.remove(localId)
                     self.pendingLocalMessages.removeAll { $0.id == localId }
@@ -652,7 +666,7 @@ struct ThreadView: View {
                 }
                 await MainActor.run {
                     self.isProcessingAttachment = false
-                    self.attachmentErrorMessage = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                    self.attachmentErrorMessage = "We couldn’t process one of the selected items. Please try again."
                     self.showingAttachmentError = true
                 }
             }

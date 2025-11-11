@@ -34,7 +34,9 @@ final class UsersStore: ObservableObject {
                     users[uid] = fallbackUser(for: uid)
                 }
             } catch {
+                #if DEBUG
                 print("UsersStore.ensure(\(uid)) error:", error.localizedDescription)
+                #endif
                 users[uid] = fallbackUser(for: uid)
             }
         }

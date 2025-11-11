@@ -8,6 +8,7 @@ struct PeopleSearchView: View {
     @State private var results: [AppUser] = []
     @State private var isSearching = false
     @State private var errorText: String?
+    @State private var lastQueryAt: Date?
 
     var body: some View {
         NavigationStack {
@@ -69,9 +70,27 @@ struct PeopleSearchView: View {
 
     private func search() async {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !q.isEmpty else { return }
-        isSearching = true
-        errorText = nil
+        guard q.count >= 3 else {
+            await MainActor.run {
+                errorText = "Enter at least three characters to search."
+            }
+            return
+        }
+
+        let now = Date()
+        let previousQueryTime = await MainActor.run { lastQueryAt }
+        if let last = previousQueryTime, now.timeIntervalSince(last) < 1.5 {
+            await MainActor.run {
+                errorText = "Please wait a moment before searching again."
+            }
+            return
+        }
+        await MainActor.run { lastQueryAt = now }
+
+        await MainActor.run {
+            isSearching = true
+            errorText = nil
+        }
 
         do {
             let db = Firestore.firestore()
@@ -113,9 +132,9 @@ struct PeopleSearchView: View {
 
             await MainActor.run { results = list }
         } catch {
-            await MainActor.run { errorText = error.localizedDescription }
+            await MainActor.run { errorText = "Search failed. Please try again." }
         }
 
-        isSearching = false
+        await MainActor.run { isSearching = false }
     }
 }
