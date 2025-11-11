@@ -12,13 +12,19 @@ actor MediaCache {
         memoryCache.countLimit = 200
         memoryCache.totalCostLimit = 60 * 1024 * 1024 // ~60 MB in-memory budget
 
-        let cachesDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first ?? URL(fileURLWithPath: NSTemporaryDirectory())
+        let cachesDirectory = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+            ?? URL(fileURLWithPath: NSTemporaryDirectory())
         let directory = cachesDirectory.appendingPathComponent("MediaCache", isDirectory: true)
+
         if !fileManager.fileExists(atPath: directory.path) {
             try? fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
         }
-        applyFileProtectionIfAvailable(to: directory)
+
+        // Initialize all stored properties before any method calls
         directoryURL = directory
+
+        // Use static helper to avoid using 'self' during initialization
+        Self.applyFileProtectionIfAvailable(to: directoryURL)
     }
 
     private func cacheKey(for url: URL) -> String {
@@ -49,13 +55,15 @@ actor MediaCache {
     func store(_ data: Data, for url: URL) {
         memoryCache.setObject(data as NSData, forKey: url as NSURL, cost: data.count)
         let path = fileURL(for: url)
+
         if !fileManager.fileExists(atPath: directoryURL.path) {
             try? fileManager.createDirectory(at: directoryURL, withIntermediateDirectories: true)
+            Self.applyFileProtectionIfAvailable(to: directoryURL)
         }
-        applyFileProtectionIfAvailable(to: directoryURL)
+
         do {
             try data.write(to: path, options: [.atomic])
-            applyFileProtectionIfAvailable(to: path)
+            Self.applyFileProtectionIfAvailable(to: path)
         } catch {
             #if DEBUG
             print("MediaCache disk write failed for \(url):", error.localizedDescription)
@@ -63,12 +71,14 @@ actor MediaCache {
         }
     }
 
-    private func applyFileProtectionIfAvailable(to url: URL) {
+    // Static helper so we don't use 'self' before init completes
+    private static func applyFileProtectionIfAvailable(to url: URL) {
         #if os(iOS)
         do {
-            try fileManager.setAttributes([
-                .protectionKey: FileProtectionType.completeUntilFirstUserAuthentication
-            ], ofItemAtPath: url.path)
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: url.path
+            )
         } catch {
             #if DEBUG
             print("Failed to apply file protection to \(url.lastPathComponent):", error.localizedDescription)
@@ -88,9 +98,7 @@ actor MediaCache {
     }
 
     func prefetch(url: URL) async {
-        if cachedData(for: url) != nil {
-            return
-        }
+        if cachedData(for: url) != nil { return }
         do {
             _ = try await data(for: url)
         } catch {
