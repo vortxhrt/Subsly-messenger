@@ -260,12 +260,15 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
     }
 
     func stopRecording(dueToLimit: Bool = false) {
-        guard state == .recording else { return }
-        recorder?.stop()
-        recordingDuration = recorder?.currentTime ?? elapsed
-        elapsed = recordingDuration
+        guard state == .recording, let recorder else { return }
+        recorder.stop()
+        let measuredDuration = recorder.currentTime
+        let duration = max(measuredDuration, elapsed)
+        recordingURL = recorder.url
+        recordingDuration = duration
+        elapsed = duration
         stopRecordTimer()
-        recorder = nil
+        self.recorder = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
 
         if recordingDuration < minimumDuration {
