@@ -1,5 +1,7 @@
 import SwiftUI
 import UIKit
+import AVFoundation
+import Combine
 
 enum DeliveryState {
     case pending   // sending (show spinner)
@@ -22,26 +24,14 @@ struct MessageBubbleView: View {
     var onReply: () -> Void = {}
     var onReplyPreviewTap: () -> Void = {}
 
-    // Small margin from the screen edge (messages only)
     private let edgeInset: CGFloat = 10
     private let verticalSpacing: CGFloat = 2
 
-    // ~75% of screen like iMessage
-    private var maxBubbleWidth: CGFloat {
-        UIScreen.main.bounds.width * 0.75
-    }
+    private var maxBubbleWidth: CGFloat { UIScreen.main.bounds.width * 0.75 }
 
-    private var trimmedText: String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var hasText: Bool {
-        !trimmedText.isEmpty
-    }
-
-    private var hasBubbleContent: Bool {
-        hasText || replyTo != nil
-    }
+    private var trimmedText: String { text.trimmingCharacters(in: .whitespacesAndNewlines) }
+    private var hasText: Bool { !trimmedText.isEmpty }
+    private var hasBubbleContent: Bool { hasText || replyTo != nil }
 
     var body: some View {
         VStack(alignment: isMe ? .trailing : .leading, spacing: 6) {
@@ -50,16 +40,10 @@ struct MessageBubbleView: View {
                     ForEach(Array(media.enumerated()), id: \.offset) { _, item in
                         HStack(spacing: 0) {
                             if isMe { Spacer(minLength: 0) }
-                            MediaAttachmentView(media: item, isPending: isMe && isSending)
+                            attachmentView(for: item)
                                 .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
                                 .padding(.leading, isMe ? 0 : edgeInset)
                                 .padding(.trailing, isMe ? edgeInset : 0)
-                                .onTapGesture {
-                                    guard !(isMe && isSending) else { return }
-                                    onAttachmentTap(item)
-                                    onTap()
-                                }
-                                .allowsHitTesting(!(isMe && isSending))
                             if !isMe { Spacer(minLength: 0) }
                         }
                     }
@@ -69,12 +53,10 @@ struct MessageBubbleView: View {
             if hasBubbleContent {
                 HStack(spacing: 0) {
                     if isMe { Spacer(minLength: 0) }
-
                     bubbleContainer
                         .frame(maxWidth: maxBubbleWidth, alignment: isMe ? .trailing : .leading)
                         .padding(.trailing, isMe ? edgeInset : 0)
                         .padding(.leading, isMe ? 0 : edgeInset)
-
                     if !isMe { Spacer(minLength: 0) }
                 }
                 .contentShape(Rectangle())
@@ -102,23 +84,36 @@ struct MessageBubbleView: View {
         .padding(.vertical, verticalSpacing)
         .contextMenu {
             if hasText {
-                Button(action: copyText) {
-                    Label("Copy", systemImage: "doc.on.doc")
-                }
+                Button(action: copyText) { Label("Copy", systemImage: "doc.on.doc") }
             }
-            Button(action: onReply) {
-                Label("Reply", systemImage: "arrowshape.turn.up.left")
-            }
+            Button(action: onReply) { Label("Reply", systemImage: "arrowshape.turn.up.left") }
         }
         .accessibilityAddTraits(.isButton)
         .accessibilityLabel(accessibilityLabel)
     }
 
+    @ViewBuilder
+    private func attachmentView(for media: MessageModel.Media) -> some View {
+        switch media.kind {
+        case .audio:
+            AudioAttachmentView(media: media,
+                                isPending: isMe && isSending,
+                                isOutgoing: isMe)
+                .allowsHitTesting(!(isMe && isSending))
+        case .image, .video:
+            MediaAttachmentView(media: media, isPending: isMe && isSending)
+                .onTapGesture {
+                    guard !(isMe && isSending) else { return }
+                    onAttachmentTap(media)
+                    onTap()
+                }
+                .allowsHitTesting(!(isMe && isSending))
+        }
+    }
+
     private var bubbleContainer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            if let replyTo {
-                replyPreviewView(replyTo)
-            }
+            if let replyTo { replyPreviewView(replyTo) }
             if hasText {
                 Text(text)
                     .foregroundStyle(isMe ? Color.white : Color.primary)
@@ -163,39 +158,30 @@ struct MessageBubbleView: View {
     private var accessibilityLabel: String {
         var components: [String] = []
         if !media.isEmpty {
-            let counts = media.reduce(into: [MessageModel.Media.Kind: Int]()) { partialResult, item in
-                let key = item.kind
-                partialResult[key, default: 0] += 1
+            let counts = media.reduce(into: [MessageModel.Media.Kind: Int]()) { partial, item in
+                partial[item.kind, default: 0] += 1
             }
-            let descriptions = counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { entry in
-                let (kind, count) = entry
-                let label = kind == .video ? "Video" : "Photo"
+            let descriptions = counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { kind, count in
+                let label: String
+                switch kind {
+                case .image: label = "Photo"
+                case .video: label = "Video"
+                case .audio: label = "Voice message"
+                }
                 return count > 1 ? "\(count) \(label)s" : label
             }
             components.append(descriptions.joined(separator: ", "))
         }
-        if !trimmedText.isEmpty {
-            components.append(isMe ? "Your message" : "Message")
-        }
-        if let replyTo {
-            components.append("Reply to \(replyTo.summary)")
-        }
-        if components.isEmpty {
-            components.append(isMe ? "Your message" : "Message")
-        }
+        if !trimmedText.isEmpty { components.append(isMe ? "Your message" : "Message") }
+        if let replyTo { components.append("Reply to \(replyTo.summary)") }
+        if components.isEmpty { components.append(isMe ? "Your message" : "Message") }
         var base = components.joined(separator: ", ")
-        if let createdAt {
-            base += ", sent \(Self.fullAccessLabel.string(from: createdAt))"
-        }
+        if let createdAt { base += ", sent \(Self.fullAccessLabel.string(from: createdAt))" }
         return base
     }
 
-    // MARK: - Formatting (rules specified)
+    // MARK: - Formatting
 
-    /// - <24h: time only
-    /// - <7d : weekday + time
-    /// - same year: day month + time
-    /// - else: day month year + time
     static func formatted(_ date: Date) -> String {
         let now = Date()
         let seconds = now.timeIntervalSince(date)
@@ -359,15 +345,13 @@ private struct MediaAttachmentView: View {
             .overlay(
                 Group {
                     if isLoadingRemote {
-                        ProgressView()
-                            .progressViewStyle(.circular)
+                        ProgressView().progressViewStyle(.circular)
                     } else if remoteLoadFailed {
                         Image(systemName: "exclamationmark.triangle")
                             .font(.system(size: 20, weight: .semibold))
                             .foregroundStyle(.secondary)
                     } else {
-                        ProgressView()
-                            .progressViewStyle(.circular)
+                        ProgressView().progressViewStyle(.circular)
                     }
                 }
             )
@@ -392,7 +376,7 @@ private struct MediaAttachmentView: View {
             return
         }
 
-        if let cached = await MediaCache.shared.cachedData(for: url), !Task.isCancelled {
+        if let cached = await AttachmentDataLoader.shared.cachedData(for: url), !Task.isCancelled {
             if let image = UIImage(data: cached) {
                 await MainActor.run {
                     remoteImage = image
@@ -409,7 +393,7 @@ private struct MediaAttachmentView: View {
         }
 
         do {
-            let data = try await MediaCache.shared.data(for: url)
+            let data = try await AttachmentDataLoader.shared.data(for: url)
             if Task.isCancelled { return }
             if let image = UIImage(data: data) {
                 await MainActor.run {
@@ -433,6 +417,282 @@ private struct MediaAttachmentView: View {
     }
 }
 
+private struct AudioAttachmentView: View {
+    let media: MessageModel.Media
+    let isPending: Bool
+    let isOutgoing: Bool
+
+    @StateObject private var player = AudioAttachmentPlayer()
+
+    private var backgroundColor: Color { isOutgoing ? Color.accentColor : Color(.secondarySystemFill) }
+    private var primaryTextColor: Color { isOutgoing ? Color.white : Color.primary }
+    private var secondaryTextColor: Color { isOutgoing ? Color.white.opacity(0.75) : Color.secondary }
+    private var controlBackground: Color { isOutgoing ? Color.white.opacity(0.18) : Color.accentColor.opacity(0.15) }
+
+    private var identifier: String {
+        if let path = media.localFilePath { return "path:\(path)" }
+        if let url = media.url { return "url:\(url)" }
+        if let data = media.localData { return "data:\(data.count)-\(media.duration ?? 0)" }
+        return "audio:\(UUID().uuidString)"
+    }
+
+    private var durationText: String {
+        guard player.duration > 0 else { return "--:--" }
+        return Self.format(player.duration)
+    }
+
+    private var progressText: String {
+        guard player.duration > 0 else { return "--:--" }
+        let current = min(max(player.currentTime, 0), player.duration)
+        return Self.format(current)
+    }
+
+    private var statusText: String {
+        if let error = player.error { return error }
+        if player.isLoading { return "Loading…" }
+        if player.duration > 0 { return player.isPlaying ? "\(progressText) / \(durationText)" : durationText }
+        return "Voice message"
+    }
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(backgroundColor)
+
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 12) {
+                    Button(action: player.togglePlayback) {
+                        Image(systemName: player.isPlaying ? "pause.fill" : "play.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(primaryTextColor)
+                            .frame(width: 44, height: 44)
+                            .background(Circle().fill(controlBackground))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isPending || player.isLoading || player.error != nil)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Voice message")
+                            .font(.subheadline)
+                            .fontWeight(.semibold)
+                            .foregroundStyle(primaryTextColor)
+
+                        Text(statusText)
+                            .font(.caption)
+                            .foregroundStyle(player.error == nil ? secondaryTextColor : Color.red)
+                    }
+
+                    Spacer()
+
+                    if player.isLoading {
+                        ProgressView().progressViewStyle(.circular).tint(primaryTextColor)
+                    } else if player.error == nil {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 20, weight: .semibold))
+                            .foregroundStyle(primaryTextColor.opacity(isOutgoing ? 0.8 : 0.6))
+                    }
+                }
+
+                if player.error == nil {
+                    ProgressView(value: player.duration > 0 ? player.progress : 0)
+                        .progressViewStyle(.linear)
+                        .tint(isOutgoing ? Color.white.opacity(0.85) : Color.accentColor)
+                        .background(Color.white.opacity(isOutgoing ? 0.18 : 0.05))
+                        .clipShape(Capsule())
+                }
+            }
+            .padding(.vertical, 14)
+            .padding(.horizontal, 16)
+
+            if isPending {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.black.opacity(0.35))
+                ProgressView().progressViewStyle(.circular).tint(.white)
+            }
+        }
+        .task(id: identifier) { player.configure(with: media, identifier: identifier) }
+        .onDisappear { player.teardown() }
+    }
+
+    private static func format(_ value: TimeInterval) -> String {
+        let totalSeconds = max(0, Int(round(value)))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+}
+
+@MainActor
+private final class AudioAttachmentPlayer: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isLoading = false
+    @Published var isPlaying = false
+    @Published var progress: Double = 0
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
+    @Published var error: String?
+
+    private var player: AVAudioPlayer?
+    private var timer: Timer?
+    private var loadTask: Task<Void, Never>?
+    private var identifier: String?
+
+    func configure(with media: MessageModel.Media, identifier: String) {
+        if identifier == self.identifier { return }
+        self.identifier = identifier
+        cancelLoading()
+        stopPlayback(releaseSession: true)
+        error = nil
+        progress = 0
+        currentTime = 0
+        duration = media.duration ?? 0
+        isLoading = true
+
+        loadTask = Task {
+            if let data = media.localData, !data.isEmpty {
+                await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+                return
+            }
+
+            if let path = media.localFilePath, FileManager.default.fileExists(atPath: path) {
+                do {
+                    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                    try Task.checkCancellation()
+                    await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+                    return
+                } catch {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+            }
+
+            guard let urlString = media.url, let url = URL(string: urlString) else {
+                await MainActor.run {
+                    self.isLoading = false
+                    self.error = "Audio unavailable."
+                }
+                return
+            }
+
+            do {
+                let data = try await AttachmentDataLoader.shared.data(for: url)
+                try Task.checkCancellation()
+                await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+            } catch {
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    self.isLoading = false
+                    self.error = "We couldn’t load this audio."
+                }
+            }
+        }
+    }
+
+    func togglePlayback() {
+        guard error == nil, !isLoading else { return }
+        isPlaying ? pause() : play()
+    }
+
+    func teardown() {
+        cancelLoading()
+        stopPlayback(releaseSession: true)
+        identifier = nil
+    }
+
+    // MARK: - Internal helpers
+
+    private func setupPlayer(with data: Data, hintDuration: Double?) {
+        stopPlayback(releaseSession: true)
+        do {
+            let player = try AVAudioPlayer(data: data)
+            player.delegate = self
+            player.prepareToPlay()
+            self.player = player
+            self.duration = hintDuration ?? player.duration
+            self.currentTime = 0
+            self.progress = 0
+            self.isLoading = false
+        } catch {
+            self.player = nil
+            self.isLoading = false
+            self.error = "We couldn’t load this audio."
+        }
+    }
+
+    private func play() {
+        guard let player else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.defaultToSpeaker, .duckOthers])
+            try session.setActive(true, options: [])
+            player.play()
+            isPlaying = true
+            startTimer()
+        } catch {
+            self.error = "Playback unavailable."
+            stopPlayback(releaseSession: true)
+        }
+    }
+
+    private func pause() {
+        guard let player else { return }
+        player.pause()
+        currentTime = player.currentTime
+        progress = duration > 0 ? player.currentTime / duration : 0
+        isPlaying = false
+        stopTimer()
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+
+    private func stopPlayback(releaseSession: Bool) {
+        if let player {
+            player.stop()
+            self.player = nil
+        }
+        isPlaying = false
+        stopTimer()
+        if releaseSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+        if !isLoading {
+            currentTime = 0
+            progress = 0
+        }
+    }
+
+    private func cancelLoading() {
+        loadTask?.cancel()
+        loadTask = nil
+        isLoading = false
+    }
+
+    private func startTimer() {
+        stopTimer()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, let player = self.player else { return }
+            self.currentTime = player.currentTime
+            if self.duration > 0 {
+                self.progress = max(0, min(1, player.currentTime / self.duration))
+            } else {
+                self.progress = 0
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    // MARK: - AVAudioPlayerDelegate
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        isPlaying = false
+        stopTimer()
+        currentTime = duration
+        progress = duration > 0 ? 1 : 0
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+}
+
 /// Spinner / ticks (shown only when expanded)
 private struct StatusIconView: View {
     let state: DeliveryState
@@ -450,24 +710,38 @@ private struct StatusIconView: View {
                 .foregroundStyle(.secondary)
         case .delivered:
             ZStack {
-                Image(systemName: "checkmark")
-                    .font(.caption2)
-                    .offset(x: -3)
-                Image(systemName: "checkmark")
-                    .font(.caption2)
-                    .offset(x: 3)
+                Image(systemName: "checkmark").font(.caption2).offset(x: -3)
+                Image(systemName: "checkmark").font(.caption2).offset(x: 3)
             }
             .foregroundStyle(.secondary)
         case .read:
             ZStack {
-                Image(systemName: "checkmark")
-                    .font(.caption2)
-                    .offset(x: -3)
-                Image(systemName: "checkmark")
-                    .font(.caption2)
-                    .offset(x: 3)
+                Image(systemName: "checkmark").font(.caption2).offset(x: -3)
+                Image(systemName: "checkmark").font(.caption2).offset(x: 3)
             }
             .foregroundStyle(Color.blue)
         }
+    }
+}
+
+// MARK: - Lightweight cache for remote media
+
+private actor AttachmentDataLoader {
+    static let shared = AttachmentDataLoader()
+    private var cache: [URL: Data] = [:]
+
+    func cachedData(for url: URL) -> Data? { cache[url] }
+
+    func data(for url: URL) async throws -> Data {
+        if let cached = cache[url] { return cached }
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        guard data.count <= 50 * 1024 * 1024 else {
+            throw URLError(.dataLengthExceedsMaximum)
+        }
+        cache[url] = data
+        return data
     }
 }

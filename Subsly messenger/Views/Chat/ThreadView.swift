@@ -61,6 +61,7 @@ struct ThreadView: View {
     @State private var mediaViewer: MediaViewerPayload?
 
     @State private var composerHeight: CGFloat = 72
+    @State private var showingVoiceRecorder = false
 
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
@@ -188,6 +189,14 @@ struct ThreadView: View {
                         onRemoveAttachment: { attachment in
                             removePendingAttachment(attachment)
                         },
+                        onRecordVoice: {
+                            if pendingAttachments.count >= attachmentLimit {
+                                attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+                                showingAttachmentError = true
+                            } else {
+                                showingVoiceRecorder = true
+                            }
+                        },
                         onCancelReply: {
                             replyPreview = nil
                         }
@@ -195,6 +204,16 @@ struct ThreadView: View {
                 }
                 .background(.ultraThinMaterial)
                 .background(ComposerHeightReader())
+            }
+            .sheet(isPresented: $showingVoiceRecorder) {
+                VoiceRecorderSheet { attachment in
+                    if pendingAttachments.count >= attachmentLimit {
+                        attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+                        showingAttachmentError = true
+                        return
+                    }
+                    pendingAttachments.append(attachment)
+                }
             }
 
             .task { await openThreadIfNeeded() }
@@ -561,6 +580,10 @@ struct ThreadView: View {
                         }
                     case .video:
                         if let thumbString = media.thumbnailURL, let url = URL(string: thumbString) {
+                            await MediaCache.shared.prefetch(url: url)
+                        }
+                    case .audio:
+                        if let urlString = media.url, let url = URL(string: urlString) {
                             await MediaCache.shared.prefetch(url: url)
                         }
                     }
@@ -1041,6 +1064,9 @@ private struct MediaViewerView: View {
             } else {
                 placeholder
             }
+
+        case .audio:
+            AudioPlayerViewer(media: media)
         }
     }
 
@@ -1342,6 +1368,259 @@ private final class VideoPlayerController: ObservableObject {
         player.replaceCurrentItem(with: nil)
         currentURL = nil
         objectWillChange.send()
+    }
+}
+
+// MARK: - Fullscreen audio viewer
+
+private struct AudioPlayerViewer: View {
+    let media: MessageModel.Media
+    @StateObject private var controller = AudioViewerController()
+
+    var body: some View {
+        VStack(spacing: 20) {
+            Spacer(minLength: 0)
+
+            // Big play/pause
+            Button(action: controller.togglePlayback) {
+                Image(systemName: controller.isPlaying ? "pause.circle.fill" : "play.circle.fill")
+                    .font(.system(size: 84, weight: .regular))
+                    .foregroundStyle(.white)
+            }
+            .buttonStyle(.plain)
+            .disabled(controller.isLoading || controller.error != nil)
+
+            // Progress + times
+            VStack(spacing: 8) {
+                Slider(value: Binding(
+                    get: { controller.duration > 0 ? controller.progress : 0 },
+                    set: { controller.seek(toProgress: $0) }
+                ))
+                .tint(.white)
+                .disabled(controller.duration <= 0)
+
+                HStack {
+                    Text(Self.format(controller.currentTime))
+                    Spacer()
+                    Text(Self.format(controller.duration))
+                }
+                .font(.caption)
+                .foregroundStyle(.white.opacity(0.85))
+            }
+            .padding(.horizontal)
+
+            if controller.isLoading {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            } else if let err = controller.error {
+                Text(err)
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal)
+            } else {
+                // filename / hint
+                Text("Voice message")
+                    .foregroundStyle(.white.opacity(0.8))
+                    .font(.callout)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .task(id: controller.identityKey(for: media)) {
+            controller.configure(with: media)
+        }
+    }
+
+    private static func format(_ value: TimeInterval) -> String {
+        let total = max(0, Int(round(value)))
+        let m = total / 60
+        let s = total % 60
+        return String(format: "%d:%02d", m, s)
+    }
+}
+
+@MainActor
+private final class AudioViewerController: NSObject, ObservableObject, AVAudioPlayerDelegate {
+    @Published var isLoading = false
+    @Published var isPlaying = false
+    @Published var progress: Double = 0
+    @Published var currentTime: TimeInterval = 0
+    @Published var duration: TimeInterval = 0
+    @Published var error: String?
+
+    private var player: AVAudioPlayer?
+    private var timer: Timer?
+    private var loadTask: Task<Void, Never>?
+
+    func identityKey(for media: MessageModel.Media) -> String {
+        if let path = media.localFilePath { return "path:\(path)" }
+        if let url = media.url { return "url:\(url)" }
+        if let data = media.localData { return "data:\(data.count)-\(media.duration ?? 0)" }
+        return UUID().uuidString
+    }
+
+    func configure(with media: MessageModel.Media) {
+        cancelLoading()
+        stopPlayback(releaseSession: true)
+        error = nil
+        progress = 0
+        currentTime = 0
+        duration = media.duration ?? 0
+        isLoading = true
+
+        loadTask = Task {
+            // Prefer local data
+            if let data = media.localData, !data.isEmpty {
+                await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+                return
+            }
+
+            // Or local file path
+            if let path = media.localFilePath, FileManager.default.fileExists(atPath: path) {
+                do {
+                    let data = try Data(contentsOf: URL(fileURLWithPath: path))
+                    try Task.checkCancellation()
+                    await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+                    return
+                } catch {
+                    try? FileManager.default.removeItem(atPath: path)
+                }
+            }
+
+            // Remote URL
+            guard let urlString = media.url, let url = URL(string: urlString) else {
+                await MainActor.run {
+                    self.isLoading = false
+                    self.error = "Audio unavailable."
+                }
+                return
+            }
+
+            do {
+                let data = try await MediaCache.shared.data(for: url)
+                try Task.checkCancellation()
+                await MainActor.run { self.setupPlayer(with: data, hintDuration: media.duration) }
+            } catch {
+                if Task.isCancelled { return }
+                await MainActor.run {
+                    self.isLoading = false
+                    self.error = "We couldn’t load this audio."
+                }
+            }
+        }
+    }
+
+    func togglePlayback() {
+        guard error == nil, !isLoading else { return }
+        isPlaying ? pause() : play()
+    }
+
+    func seek(toProgress newValue: Double) {
+        guard let player, duration > 0 else { return }
+        let clamped = max(0, min(1, newValue))
+        let target = duration * clamped
+        player.currentTime = target
+        currentTime = target
+        progress = clamped
+        if isPlaying {
+            // ensure timer keeps running
+            startTimer()
+        }
+    }
+
+    // MARK: - Internals
+
+    private func setupPlayer(with data: Data, hintDuration: Double?) {
+        stopPlayback(releaseSession: true)
+        do {
+            let player = try AVAudioPlayer(data: data)
+            player.delegate = self
+            player.prepareToPlay()
+            self.player = player
+            self.duration = hintDuration ?? player.duration
+            self.currentTime = 0
+            self.progress = 0
+            self.isLoading = false
+        } catch {
+            self.player = nil
+            self.isLoading = false
+            self.error = "We couldn’t load this audio."
+        }
+    }
+
+    private func play() {
+        guard let player else { return }
+        do {
+            let session = AVAudioSession.sharedInstance()
+            try session.setCategory(.playback, mode: .spokenAudio, options: [.defaultToSpeaker, .duckOthers])
+            try session.setActive(true, options: [])
+            player.play()
+            isPlaying = true
+            startTimer()
+        } catch {
+            self.error = "Playback unavailable."
+            stopPlayback(releaseSession: true)
+        }
+    }
+
+    private func pause() {
+        guard let player else { return }
+        player.pause()
+        currentTime = player.currentTime
+        progress = duration > 0 ? player.currentTime / duration : 0
+        isPlaying = false
+        stopTimer()
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    }
+
+    private func stopPlayback(releaseSession: Bool) {
+        if let player {
+            player.stop()
+            self.player = nil
+        }
+        isPlaying = false
+        stopTimer()
+        if releaseSession {
+            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        }
+        currentTime = 0
+        progress = 0
+    }
+
+    private func cancelLoading() {
+        loadTask?.cancel()
+        loadTask = nil
+        isLoading = false
+    }
+
+    private func startTimer() {
+        stopTimer()
+        timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            guard let self, let player = self.player else { return }
+            self.currentTime = player.currentTime
+            if self.duration > 0 {
+                self.progress = max(0, min(1, player.currentTime / self.duration))
+            } else {
+                self.progress = 0
+            }
+        }
+    }
+
+    private func stopTimer() {
+        timer?.invalidate()
+        timer = nil
+    }
+
+    // MARK: - AVAudioPlayerDelegate
+
+    func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+        isPlaying = false
+        stopTimer()
+        currentTime = duration
+        progress = duration > 0 ? 1 : 0
+        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
     }
 }
 

@@ -12,6 +12,7 @@ struct ComposerView: View {
     var onTyping: (Bool) -> Void = { _ in }   // keep for typing indicator
     var onPickAttachments: ([PhotosPickerItem]) -> Void
     var onRemoveAttachment: (PendingAttachment) -> Void
+    var onRecordVoice: () -> Void = {}
     var onCancelReply: () -> Void = {}
 
     @FocusState private var isFocused: Bool
@@ -91,6 +92,21 @@ struct ComposerView: View {
                     onPickAttachments(newValue)
                     pickerItems = []
                 }
+
+                Button(action: onRecordVoice) {
+                    Image(systemName: "mic.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 22, height: 22)
+                        .padding(.horizontal, innerH)
+                        .padding(.vertical, innerV)
+                        .background(
+                            RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+                                .fill(Color(.secondarySystemFill))
+                        )
+                }
+                .buttonStyle(.plain)
+                .disabled(isProcessingAttachment)
+                .accessibilityLabel("Record voice message")
 
                 // --- Input bubble (WhatsApp-style) ---
                 VStack(alignment: .leading, spacing: 0) {
@@ -178,8 +194,29 @@ private struct AttachmentPreviewView: View {
         return UIImage(data: data)
     }
 
-    var body: some View {
-        HStack(spacing: 12) {
+    private var kindLabel: String {
+        switch attachment.kind {
+        case .image:
+            return "Photo"
+        case .video:
+            return "Video"
+        case .audio:
+            return "Voice message"
+        }
+    }
+
+    private var durationText: String? {
+        guard let duration = attachment.duration else { return nil }
+        let totalSeconds = max(0, Int(round(duration)))
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    @ViewBuilder
+    private var previewContent: some View {
+        switch attachment.kind {
+        case .image, .video:
             ZStack(alignment: .bottomTrailing) {
                 if let image = previewImage {
                     Image(uiImage: image)
@@ -202,7 +239,7 @@ private struct AttachmentPreviewView: View {
                         )
                 }
 
-                if attachment.isVideo {
+                if case .video = attachment.kind {
                     Image(systemName: "play.circle.fill")
                         .font(.system(size: 20, weight: .bold))
                         .symbolRenderingMode(.palette)
@@ -210,11 +247,33 @@ private struct AttachmentPreviewView: View {
                         .padding(6)
                 }
             }
+        case .audio:
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(Color.accentColor.opacity(0.15))
+                .frame(width: 72, height: 72)
+                .overlay(
+                    Image(systemName: "waveform")
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundStyle(Color.accentColor)
+                )
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 12) {
+            previewContent
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(attachment.isVideo ? "Video" : "Photo")
+                Text(kindLabel)
                     .font(.subheadline)
                     .fontWeight(.semibold)
+
+                if let durationText {
+                    Label(durationText, systemImage: "clock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .labelStyle(.titleAndIcon)
+                }
             }
 
             Spacer()
@@ -251,6 +310,7 @@ private struct ReplyInlinePreview: View {
         switch preview.mediaKind {
         case .some(.image): return "photo"
         case .some(.video): return "video"
+        case .some(.audio): return "waveform"
         default: return nil
         }
     }

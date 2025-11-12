@@ -5,6 +5,7 @@ struct MessageModel: Identifiable, Hashable {
         enum Kind: String, Hashable {
             case image
             case video
+            case audio
         }
 
         let kind: Kind
@@ -15,6 +16,7 @@ struct MessageModel: Identifiable, Hashable {
         let duration: Double?
         let localData: Data?
         let localThumbnailData: Data?
+        let localFilePath: String?
     }
 
     struct ReplyPreview: Hashable {
@@ -45,6 +47,8 @@ struct MessageModel: Identifiable, Hashable {
                     return "Photo"
                 case .video:
                     return "Video"
+                case .audio:
+                    return "Voice message"
                 }
             }
             return "Message"
