@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseCore
 import FirebaseFirestore
+import FirebaseAuth
 
 enum ChatServiceError: LocalizedError {
     case notThreadMember
@@ -12,57 +13,17 @@ enum ChatServiceError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .notThreadMember:
-            return "You’re no longer a member of this conversation."
-        case .threadUnavailable:
-            return "This conversation is unavailable."
-        case .emptyMessage:
-            return "Messages must include text or an attachment."
-        case .textTooLong:
-            return "Messages are limited to 4,000 characters."
-        case .tooManyAttachments:
-            return "You can attach up to 20 items per message."
-        case .attachmentValidationFailed:
-            return "One of the attachments could not be processed."
+        case .notThreadMember: return "You’re no longer a member of this conversation."
+        case .threadUnavailable: return "This conversation is unavailable."
+        case .emptyMessage: return "Messages must include text or an attachment."
+        case .textTooLong: return "Messages are limited to 4,000 characters."
+        case .tooManyAttachments: return "You can attach up to 20 items per message."
+        case .attachmentValidationFailed: return "One of the attachments could not be processed."
         }
     }
 }
 
-// MARK: - Validations
-private let maxAttachmentCount = 20
-private let maxImageBytes = 6 * 1024 * 1024
-private let maxVideoBytes: Int64 = Int64(40 * 1024 * 1024)
-private let maxVideoDuration: Double = 180
-
-private func validateAttachments(_ attachments: [PendingAttachment]) throws {
-    guard attachments.count <= maxAttachmentCount else {
-        throw ChatServiceError.tooManyAttachments
-    }
-
-    for attachment in attachments {
-        switch attachment.kind {
-        case .image(let data, let width, let height):
-            guard width > 0, height > 0, data.count <= maxImageBytes else {
-                throw ChatServiceError.attachmentValidationFailed
-            }
-        case .video(let fileURL, _, let width, let height, let duration):
-            guard width > 0, height > 0, duration <= maxVideoDuration else {
-                throw ChatServiceError.attachmentValidationFailed
-            }
-
-            do {
-                let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
-                if let size = attributes[.size] as? NSNumber, size.int64Value > maxVideoBytes {
-                    throw ChatServiceError.attachmentValidationFailed
-                }
-            } catch {
-                throw ChatServiceError.attachmentValidationFailed
-            }
-        }
-    }
-}
-
-// ListenerRegistration is @MainActor, so make this class @MainActor too.
+// ListenerRegistration is main-actor isolated; keep this type main-actor too.
 @MainActor
 final class DummyListener: NSObject, ListenerRegistration {
     static let shared = DummyListener()
@@ -71,15 +32,47 @@ final class DummyListener: NSObject, ListenerRegistration {
 }
 
 actor ChatService {
-    // Warning-free singleton
+    // MARK: - Singleton
     nonisolated static let shared = ChatService()
 
-    // MARK: Availability / references
-    private func isConfigured() async -> Bool {
-        await MainActor.run { FirebaseApp.app() != nil }
+    // MARK: - Debug helpers (nonisolated -> callable anywhere, no actor hop)
+    nonisolated static func dbg(_ items: Any..., fn: String = #function) {
+        let ts = ISO8601DateFormatter().string(from: Date())
+        let msg = items.map { String(describing: $0) }.joined(separator: " ")
+        print("🧭 [ChatService][\(fn)] \(ts): \(msg)")
     }
-    private func threadsCollection() async -> CollectionReference? {
-        guard await isConfigured() else { return nil }
+
+    nonisolated static func enableFirebaseSDKDebugIfNeeded() {
+        struct Once { static var did = false }
+        if Once.did { return }
+        FirebaseConfiguration.shared.setLoggerLevel(.debug)
+        Once.did = true
+        dbg("Firebase logger level set to .debug")
+    }
+
+    nonisolated static func dumpNSError(_ error: Error, fn: String = #function) {
+        let ns = error as NSError
+        dbg("NSError domain=\(ns.domain) code=\(ns.code)", fn: fn)
+        if !ns.userInfo.isEmpty {
+            dbg("userInfo keys:", Array(ns.userInfo.keys), fn: fn)
+            if let reason = ns.userInfo[NSLocalizedFailureReasonErrorKey] { dbg("failureReason:", reason, fn: fn) }
+            if let descr = ns.userInfo[NSLocalizedDescriptionKey] { dbg("desc:", descr, fn: fn) }
+            if let underlying = ns.userInfo[NSUnderlyingErrorKey] as? NSError {
+                dbg("underlying domain=\(underlying.domain) code=\(underlying.code) info=\(underlying.userInfo)", fn: fn)
+            }
+        }
+    }
+
+    // MARK: - Limits / validation
+    private let maxAttachmentCount = 20
+    private let maxImageBytes = 6 * 1024 * 1024
+    private let maxVideoBytes: Int64 = Int64(40 * 1024 * 1024)
+    private let maxVideoDuration: Double = 180
+
+    // MARK: - Firestore helpers
+    private func isConfigured() -> Bool { FirebaseApp.app() != nil }
+    private func threadsCollection() -> CollectionReference? {
+        guard isConfigured() else { return nil }
         return Firestore.firestore().collection("threads")
     }
 
@@ -88,149 +81,227 @@ actor ChatService {
         [a, b].sorted().joined(separator: "_")
     }
 
-    // MARK: Ensure thread (don’t clobber preview/timestamp)
+    // MARK: - Attachment validation (actor-isolated)
+    private func validateAttachments(_ attachments: [PendingAttachment]) throws {
+        guard attachments.count <= maxAttachmentCount else {
+            throw ChatServiceError.tooManyAttachments
+        }
+        for attachment in attachments {
+            switch attachment.kind {
+            case .image(let data, let w, let h):
+                guard w > 0, h > 0, data.count <= maxImageBytes else {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+            case .video(let fileURL, _, let w, let h, let duration):
+                guard w > 0, h > 0, duration <= maxVideoDuration else {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+                do {
+                    let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                    if let size = attrs[.size] as? NSNumber, size.int64Value > maxVideoBytes {
+                        throw ChatServiceError.attachmentValidationFailed
+                    }
+                } catch {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+            }
+        }
+    }
+
+    // MARK: - Ensure thread
     func ensureThread(currentUID: String, otherUID: String) async throws -> ThreadModel {
+        ChatService.enableFirebaseSDKDebugIfNeeded()
+        ChatService.dbg("ensureThread current=\(currentUID) other=\(otherUID)")
         let tid = threadId(for: currentUID, otherUID)
-        guard let threadsCol = await threadsCollection() else {
+        guard let threadsCol = threadsCollection() else {
+            ChatService.dbg("Firestore not configured; returning local model only.")
             return ThreadModel(id: tid, members: [currentUID, otherUID], lastMessagePreview: nil, updatedAt: nil)
         }
         try await threadsCol.document(tid).setData(["members": [currentUID, otherUID]], merge: true)
+        ChatService.dbg("ensureThread upserted members for tid=\(tid)")
         return ThreadModel(id: tid, members: [currentUID, otherUID], lastMessagePreview: nil, updatedAt: nil)
     }
 
-    // MARK: Send message + bump preview/timestamp
+    // MARK: - Send message
     func sendMessage(threadId: String,
                      from senderId: String,
                      text: String,
                      clientMessageId: String,
                      attachments: [PendingAttachment] = [],
                      reply: MessageModel.ReplyPreview? = nil) async throws {
-        guard let threadsCol = await threadsCollection() else {
-            print("✈️ Offline/local mode: not sending message.")
+
+        ChatService.enableFirebaseSDKDebugIfNeeded()
+        let authUid = Auth.auth().currentUser?.uid
+        ChatService.dbg("sendMessage tid=\(threadId) senderId=\(senderId) authUid=\(authUid ?? "nil") textLen=\(text.count) attachCount=\(attachments.count)")
+        guard let authUid, authUid == senderId else {
+            ChatService.dbg("AUTH MISMATCH: senderId != auth.uid")
+            throw ChatServiceError.notThreadMember
+        }
+
+        guard let threadsCol = threadsCollection() else {
+            ChatService.dbg("Firestore not configured; abort send.")
             return
         }
 
         try validateAttachments(attachments)
 
-        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty || !attachments.isEmpty else {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty || !attachments.isEmpty else {
+            ChatService.dbg("Rejecting empty message.")
             throw ChatServiceError.emptyMessage
         }
-        if trimmedText.count > 4000 {
+        if trimmed.count > 4000 {
+            ChatService.dbg("Rejecting too long text len=\(trimmed.count)")
             throw ChatServiceError.textTooLong
         }
 
-        let threadDocument: DocumentSnapshot
+        let threadRef = threadsCol.document(threadId)
+
         do {
-            threadDocument = try await threadsCol.document(threadId).getDocument()
+            let snap = try await threadRef.getDocument()
+            guard snap.exists else {
+                ChatService.dbg("Thread doc not found.")
+                throw ChatServiceError.threadUnavailable
+            }
+            let members = snap.data()?["members"] as? [String] ?? []
+            ChatService.dbg("Thread members=", members)
+            guard members.contains(senderId) else {
+                ChatService.dbg("Sender not in thread members.")
+                throw ChatServiceError.notThreadMember
+            }
         } catch {
+            ChatService.dbg("getDocument failed"); ChatService.dumpNSError(error)
             throw ChatServiceError.threadUnavailable
         }
 
-        guard threadDocument.exists else {
-            throw ChatServiceError.threadUnavailable
-        }
-
-        let members = threadDocument.data()?["members"] as? [String] ?? []
-        guard members.contains(senderId) else {
-            throw ChatServiceError.notThreadMember
-        }
-
-        let msgRef = threadsCol.document(threadId).collection("messages").document()
+        let msgRef = threadRef.collection("messages").document()
         var payload: [String: Any] = [
             "senderId": senderId,
-            "text": trimmedText,
             "clientMessageId": clientMessageId,
             "createdAt": FieldValue.serverTimestamp()
         ]
+        if !trimmed.isEmpty { payload["text"] = trimmed }
 
-        let uploadedAttachments = try await AttachmentService.shared.upload(attachments, threadId: threadId)
+        let uploaded = try await AttachmentService.shared.upload(attachments, threadId: threadId)
+        ChatService.dbg("uploaded attachments count=", uploaded.count)
 
-        if let first = uploadedAttachments.first {
+        if let first = uploaded.first {
             payload["mediaType"] = first.kind.rawValue
             payload["mediaURL"] = first.mediaURL
-            if let thumb = first.thumbnailURL {
-                payload["thumbnailURL"] = thumb
-            }
+            if let t = first.thumbnailURL { payload["thumbnailURL"] = t }
             payload["mediaWidth"] = first.width
             payload["mediaHeight"] = first.height
-            if let duration = first.duration {
-                payload["mediaDuration"] = duration
-            }
+            if let d = first.duration { payload["mediaDuration"] = d }
         }
-
-        if !uploadedAttachments.isEmpty {
-            payload["attachments"] = uploadedAttachments.map { attachment in
-                var dict: [String: Any] = [
-                    "type": attachment.kind.rawValue,
-                    "url": attachment.mediaURL,
-                    "width": attachment.width,
-                    "height": attachment.height
+        if !uploaded.isEmpty {
+            payload["attachments"] = uploaded.map { a in
+                var d: [String: Any] = [
+                    "type": a.kind.rawValue,
+                    "url": a.mediaURL,
+                    "width": a.width,
+                    "height": a.height
                 ]
-                if let thumb = attachment.thumbnailURL { dict["thumbnailURL"] = thumb }
-                if let duration = attachment.duration { dict["duration"] = duration }
-                return dict
+                if let t = a.thumbnailURL { d["thumbnailURL"] = t }
+                if let dur = a.duration { d["duration"] = dur }
+                return d
             }
         }
-
-        if let reply {
-            payload["replyToMessageId"] = reply.messageId
-            if let replySenderId = reply.senderId { payload["replyToSenderId"] = replySenderId }
-            if let replySenderName = reply.senderName { payload["replyToSenderName"] = replySenderName }
-            if let replyText = reply.text { payload["replyToText"] = replyText }
-            if let mediaKind = reply.mediaKind { payload["replyToMediaType"] = mediaKind.rawValue }
+        if let r = reply {
+            payload["replyToMessageId"] = r.messageId
+            if let s = r.senderId { payload["replyToSenderId"] = s }
+            if let n = r.senderName { payload["replyToSenderName"] = n }
+            if let tx = r.text { payload["replyToText"] = tx }
+            if let mk = r.mediaKind { payload["replyToMediaType"] = mk.rawValue }
         }
 
-        try await msgRef.setData(payload, merge: true)
-
-        let previewText: String
-        if !trimmedText.isEmpty {
-            previewText = trimmedText
-        } else if !uploadedAttachments.isEmpty {
-            if uploadedAttachments.count == 1, let first = uploadedAttachments.first {
-                previewText = first.previewText
-            } else {
-                let counts = uploadedAttachments.reduce(into: [MessageModel.Media.Kind: Int]()) { partialResult, attachment in
-                    partialResult[attachment.kind, default: 0] += 1
-                }
-                let descriptions = counts.sorted { $0.key.rawValue < $1.key.rawValue }.map { entry -> String in
-                    let (kind, count) = entry
-                    let label = kind == .video ? "Video" : "Photo"
-                    return count > 1 ? "\(count) \(label)s" : label
-                }
-                previewText = descriptions.joined(separator: ", ")
-            }
-        } else {
-            previewText = ""
+        do {
+            try await msgRef.setData(payload, merge: true)
+            ChatService.dbg("Message written id=\(msgRef.documentID)")
+        } catch {
+            ChatService.dbg("setData failed"); ChatService.dumpNSError(error)
+            throw error
         }
 
-        try await threadsCol.document(threadId).updateData([
-            "lastMessagePreview": previewText,
-            "updatedAt": FieldValue.serverTimestamp()
-        ])
+        let preview: String = {
+            if !trimmed.isEmpty { return trimmed }
+            if uploaded.isEmpty { return "" }
+            if uploaded.count == 1, let f = uploaded.first { return f.previewText }
+            let counts = uploaded.reduce(into: [MessageModel.Media.Kind: Int]()) { $0[$1.kind, default: 0] += 1 }
+            return counts
+                .sorted { $0.key.rawValue < $1.key.rawValue }
+                .map { kind, c in (kind == .video) ? (c > 1 ? "\(c) Videos" : "Video")
+                                 : (c > 1 ? "\(c) Photos" : "Photo") }
+                .joined(separator: ", ")
+        }()
+
+        do {
+            try await threadRef.updateData([
+                "lastMessagePreview": preview,
+                "updatedAt": FieldValue.serverTimestamp()
+            ])
+            ChatService.dbg("Thread updated preview + timestamp")
+        } catch {
+            ChatService.dbg("threadRef.updateData failed"); ChatService.dumpNSError(error)
+            throw error
+        }
     }
 
-    // MARK: Listeners (run on main actor to match ListenerRegistration)
+    // MARK: - Listeners with deep debug
     @MainActor
-    func listenThreads(for uid: String,
+    func listenThreads(for uidHint: String,
                        onChange: @escaping ([ThreadModel]) -> Void) -> ListenerRegistration {
+        ChatService.enableFirebaseSDKDebugIfNeeded()
+
         guard FirebaseApp.app() != nil else {
-            onChange([])
-            return DummyListener.shared
+            ChatService.dbg("No FirebaseApp; abort listen.")
+            onChange([]); return DummyListener.shared
+        }
+        let authUid = Auth.auth().currentUser?.uid
+        ChatService.dbg("listenThreads uidHint=\(uidHint) authUid=\(authUid ?? "nil")")
+
+        guard let authUid else {
+            ChatService.dbg("No Auth user present at listen time.")
+            onChange([]); return DummyListener.shared
+        }
+        if authUid != uidHint {
+            ChatService.dbg("UID mismatch: using authUid=\(authUid) (hint=\(uidHint))")
+        }
+        let uid = authUid
+
+        let threadsCol = Firestore.firestore().collection("threads")
+        let query = threadsCol.whereField("members", arrayContains: uid)
+                              .order(by: "updatedAt", descending: true)
+        ChatService.dbg("Query: threads WHERE members ARRAY_CONTAINS \(uid) ORDER BY updatedAt DESC")
+
+        // PROBE 0: correct query, one-shot
+        query.limit(to: 1).getDocuments { snap, err in
+            if let err = err {
+                ChatService.dbg("PROBE0 one-shot failed"); ChatService.dumpNSError(err)
+            } else {
+                ChatService.dbg("PROBE0 one-shot OK, count=\(snap?.documents.count ?? 0)")
+            }
         }
 
-        let q = Firestore.firestore()
-            .collection("threads")
-            .whereField("members", arrayContains: uid)
-            .order(by: "updatedAt", descending: true)
+        // PROBE 1: missing membership filter (should fail with secure rules)
+        threadsCol.order(by: "updatedAt", descending: true).limit(to: 1).getDocuments { _, err in
+            if let err = err {
+                ChatService.dbg("PROBE1 no-members-filter expected fail:"); ChatService.dumpNSError(err)
+            } else {
+                ChatService.dbg("PROBE1 unexpectedly succeeded (rules allow list broadly)")
+            }
+        }
 
-        return q.addSnapshotListener { snap, err in
+        // Live listener
+        return query.addSnapshotListener { snap, err in
+            if let err = err {
+                ChatService.dbg("LIVE LISTEN FAILED"); ChatService.dumpNSError(err)
+                onChange([]); return
+            }
             guard let snap else {
-                print("Threads listen error:", err?.localizedDescription ?? "")
-                onChange([])
-                return
+                ChatService.dbg("LIVE LISTEN: nil snapshot, no error"); onChange([]); return
             }
             let models = snap.documents.map { Self.mapToThread(id: $0.documentID, map: $0.data()) }
+            ChatService.dbg("LIVE LISTEN OK, docs=\(models.count)")
             onChange(models)
         }
     }
@@ -239,9 +310,12 @@ actor ChatService {
     func listenMessages(threadId: String,
                         limit: Int = 100,
                         onChange: @escaping ([MessageModel]) -> Void) -> ListenerRegistration {
+        ChatService.enableFirebaseSDKDebugIfNeeded()
+        ChatService.dbg("listenMessages tid=\(threadId) limit=\(limit)")
+
         guard FirebaseApp.app() != nil else {
-            onChange([])
-            return DummyListener.shared
+            ChatService.dbg("No FirebaseApp; abort messages listen.")
+            onChange([]); return DummyListener.shared
         }
 
         let q = Firestore.firestore()
@@ -250,36 +324,65 @@ actor ChatService {
             .order(by: "createdAt", descending: false)
             .limit(toLast: limit)
 
+        // Probe
+        q.limit(to: 1).getDocuments { snap, err in
+            if let err = err {
+                ChatService.dbg("PROBE messages one-shot failed"); ChatService.dumpNSError(err)
+            } else {
+                ChatService.dbg("PROBE messages one-shot OK count=\(snap?.documents.count ?? 0)")
+            }
+        }
+
         return q.addSnapshotListener { snap, err in
+            if let err = err {
+                ChatService.dbg("LIVE messages listen failed"); ChatService.dumpNSError(err)
+                onChange([]); return
+            }
             guard let snap else {
-                print("Messages listen error:", err?.localizedDescription ?? "")
-                onChange([])
-                return
+                ChatService.dbg("LIVE messages: nil snapshot"); onChange([]); return
             }
             let models: [MessageModel] = snap.documents.map { doc in
                 let data = doc.data()
-                let ts = (data["createdAt"] as? Timestamp)?.dateValue()
-                let text = data["text"] as? String ?? ""
-                let media = Self.mapMediaList(from: data)
-                let delivered = data["deliveredTo"] as? [String] ?? []
-                let read = data["readBy"] as? [String] ?? []
                 return MessageModel(
                     id: doc.documentID,
                     clientMessageId: data["clientMessageId"] as? String,
                     senderId: data["senderId"] as? String ?? "",
-                    text: text,
-                    createdAt: ts,
-                    media: media,
-                    deliveredTo: delivered,
-                    readBy: read,
+                    text: data["text"] as? String ?? "",
+                    createdAt: (data["createdAt"] as? Timestamp)?.dateValue(),
+                    media: Self.mapMediaList(from: data),
+                    deliveredTo: data["deliveredTo"] as? [String] ?? [],
+                    readBy: data["readBy"] as? [String] ?? [],
                     replyTo: ChatService.mapReply(from: data)
                 )
             }
+            ChatService.dbg("LIVE messages OK count=\(models.count)")
             onChange(models)
         }
     }
 
-    // MARK: Mapping
+    // MARK: - Presence probe (optional helper for debugging a specific doc)
+    @MainActor
+    func debugProbePresence(threadId: String, userId: String) {
+        ChatService.dbg("debugProbePresence tid=\(threadId) uid=\(userId)")
+        guard FirebaseApp.app() != nil else {
+            ChatService.dbg("No FirebaseApp; abort presence probe.")
+            return
+        }
+        let ref = Firestore.firestore()
+            .collection("threads").document(threadId)
+            .collection("presence").document(userId)
+
+        ref.getDocument { snap, err in
+            if let err = err {
+                ChatService.dbg("PRESENCE PROBE FAILED"); ChatService.dumpNSError(err)
+            } else {
+                let exists = snap?.exists ?? false
+                ChatService.dbg("PRESENCE PROBE OK exists=\(exists) data=\(snap?.data() ?? [:])")
+            }
+        }
+    }
+
+    // MARK: - Mapping
     nonisolated private static func mapToThread(id: String, map: [String: Any]) -> ThreadModel {
         let members = map["members"] as? [String] ?? []
         let last = map["lastMessagePreview"] as? String
@@ -290,50 +393,29 @@ actor ChatService {
     nonisolated private static func mapMediaList(from data: [String: Any]) -> [MessageModel.Media] {
         if let attachments = data["attachments"] as? [[String: Any]] {
             let mapped = attachments.compactMap { mapAttachmentDict($0) }
-            if !mapped.isEmpty {
-                return mapped
-            }
+            if !mapped.isEmpty { return mapped }
         }
-
-        if let legacy = mapLegacyMedia(from: data) {
-            return [legacy]
-        }
-
+        if let legacy = mapLegacyMedia(from: data) { return [legacy] }
         return []
     }
 
     nonisolated private static func mapLegacyMedia(from data: [String: Any]) -> MessageModel.Media? {
         guard let typeRaw = data["mediaType"] as? String,
-              let kind = MessageModel.Media.Kind(rawValue: typeRaw) else {
+              let kind = MessageModel.Media.Kind(rawValue: typeRaw) else { return nil }
+
+        func number(_ v: Any?) -> Double? {
+            if let d = v as? Double { return d }
+            if let i = v as? Int { return Double(i) }
+            if let n = v as? NSNumber { return n.doubleValue }
             return nil
         }
-
-        func number(from value: Any?) -> Double? {
-            if let doubleValue = value as? Double {
-                return doubleValue
-            }
-            if let intValue = value as? Int {
-                return Double(intValue)
-            }
-            if let number = value as? NSNumber {
-                return number.doubleValue
-            }
-            return nil
-        }
-
-        let url = data["mediaURL"] as? String
-        let thumbnail = data["thumbnailURL"] as? String
-        let width = number(from: data["mediaWidth"])
-        let height = number(from: data["mediaHeight"])
-        let duration = number(from: data["mediaDuration"])
-
         return MessageModel.Media(
             kind: kind,
-            url: url,
-            thumbnailURL: thumbnail,
-            width: width,
-            height: height,
-            duration: duration,
+            url: data["mediaURL"] as? String,
+            thumbnailURL: data["thumbnailURL"] as? String,
+            width: number(data["mediaWidth"]),
+            height: number(data["mediaHeight"]),
+            duration: number(data["mediaDuration"]),
             localData: nil,
             localThumbnailData: nil
         )
@@ -341,64 +423,35 @@ actor ChatService {
 
     nonisolated private static func mapAttachmentDict(_ dict: [String: Any]) -> MessageModel.Media? {
         guard let typeRaw = dict["type"] as? String,
-              let kind = MessageModel.Media.Kind(rawValue: typeRaw) else {
+              let kind = MessageModel.Media.Kind(rawValue: typeRaw) else { return nil }
+
+        func number(_ v: Any?) -> Double? {
+            if let d = v as? Double { return d }
+            if let i = v as? Int { return Double(i) }
+            if let n = v as? NSNumber { return n.doubleValue }
             return nil
         }
-
-        func number(from value: Any?) -> Double? {
-            if let doubleValue = value as? Double {
-                return doubleValue
-            }
-            if let intValue = value as? Int {
-                return Double(intValue)
-            }
-            if let number = value as? NSNumber {
-                return number.doubleValue
-            }
-            return nil
-        }
-
-        let url = dict["url"] as? String
-        let thumbnail = dict["thumbnailURL"] as? String
-        let width = number(from: dict["width"])
-        let height = number(from: dict["height"])
-        let duration = number(from: dict["duration"])
-
         return MessageModel.Media(
             kind: kind,
-            url: url,
-            thumbnailURL: thumbnail,
-            width: width,
-            height: height,
-            duration: duration,
+            url: dict["url"] as? String,
+            thumbnailURL: dict["thumbnailURL"] as? String,
+            width: number(dict["width"]),
+            height: number(dict["height"]),
+            duration: number(dict["duration"]),
             localData: nil,
             localThumbnailData: nil
         )
     }
 
     nonisolated private static func mapReply(from data: [String: Any]) -> MessageModel.ReplyPreview? {
-        guard let messageId = data["replyToMessageId"] as? String, !messageId.isEmpty else {
-            return nil
-        }
-
-        let senderId = data["replyToSenderId"] as? String
-        let senderName = data["replyToSenderName"] as? String
-        let text = data["replyToText"] as? String
-
-        let rawMediaType = (data["replyToMediaType"] as? String)?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        let mediaKind: MessageModel.Media.Kind?
-        if let rawMediaType, !rawMediaType.isEmpty {
-            mediaKind = MessageModel.Media.Kind(rawValue: rawMediaType)
-        } else {
-            mediaKind = nil
-        }
-
+        guard let messageId = data["replyToMessageId"] as? String, !messageId.isEmpty else { return nil }
+        let raw = (data["replyToMediaType"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let mediaKind = raw.flatMap { MessageModel.Media.Kind(rawValue: $0) }
         return MessageModel.ReplyPreview(
             messageId: messageId,
-            senderId: senderId,
-            senderName: senderName,
-            text: text,
+            senderId: data["replyToSenderId"] as? String,
+            senderName: data["replyToSenderName"] as? String,
+            text: data["replyToText"] as? String,
             mediaKind: mediaKind
         )
     }
