@@ -62,6 +62,7 @@ final class DiskImageCache {
 
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            Self.applyFileProtectionIfAvailable(to: directory)
         } catch {
             #if DEBUG
             print("DiskImageCache directory creation failed: \(error)")
@@ -98,13 +99,34 @@ final class DiskImageCache {
         let fileURL = self.fileURL(for: url)
         ioQueue.async {
             do {
+                if !FileManager.default.fileExists(atPath: self.directory.path) {
+                    try FileManager.default.createDirectory(at: self.directory, withIntermediateDirectories: true)
+                    Self.applyFileProtectionIfAvailable(to: self.directory)
+                }
+
                 try data.write(to: fileURL, options: .atomic)
+                Self.applyFileProtectionIfAvailable(to: fileURL)
             } catch {
                 #if DEBUG
                 print("DiskImageCache store failed: \(error)")
                 #endif
             }
         }
+    }
+
+    private static func applyFileProtectionIfAvailable(to url: URL) {
+        #if os(iOS)
+        do {
+            try FileManager.default.setAttributes(
+                [.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication],
+                ofItemAtPath: url.path
+            )
+        } catch {
+            #if DEBUG
+            print("Failed to apply file protection to \(url.lastPathComponent): \(error)")
+            #endif
+        }
+        #endif
     }
 
     private func fileURL(for url: URL) -> URL {
