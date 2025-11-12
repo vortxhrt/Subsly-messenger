@@ -68,6 +68,8 @@ actor ChatService {
     private let maxImageBytes = 6 * 1024 * 1024
     private let maxVideoBytes: Int64 = Int64(40 * 1024 * 1024)
     private let maxVideoDuration: Double = 180
+    private let maxAudioBytes: Int64 = Int64(12 * 1024 * 1024)
+    private let maxAudioDuration: Double = 5 * 60
 
     // MARK: - Firestore helpers
     private func isConfigured() -> Bool { FirebaseApp.app() != nil }
@@ -99,6 +101,18 @@ actor ChatService {
                 do {
                     let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
                     if let size = attrs[.size] as? NSNumber, size.int64Value > maxVideoBytes {
+                        throw ChatServiceError.attachmentValidationFailed
+                    }
+                } catch {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+            case .audio(let fileURL, let duration):
+                guard duration > 0, duration <= maxAudioDuration else {
+                    throw ChatServiceError.attachmentValidationFailed
+                }
+                do {
+                    let attrs = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+                    if let size = attrs[.size] as? NSNumber, size.int64Value > maxAudioBytes {
                         throw ChatServiceError.attachmentValidationFailed
                     }
                 } catch {
@@ -189,18 +203,18 @@ actor ChatService {
             payload["mediaType"] = first.kind.rawValue
             payload["mediaURL"] = first.mediaURL
             if let t = first.thumbnailURL { payload["thumbnailURL"] = t }
-            payload["mediaWidth"] = first.width
-            payload["mediaHeight"] = first.height
+            if let width = first.width { payload["mediaWidth"] = width }
+            if let height = first.height { payload["mediaHeight"] = height }
             if let d = first.duration { payload["mediaDuration"] = d }
         }
         if !uploaded.isEmpty {
             payload["attachments"] = uploaded.map { a in
                 var d: [String: Any] = [
                     "type": a.kind.rawValue,
-                    "url": a.mediaURL,
-                    "width": a.width,
-                    "height": a.height
+                    "url": a.mediaURL
                 ]
+                if let width = a.width { d["width"] = width }
+                if let height = a.height { d["height"] = height }
                 if let t = a.thumbnailURL { d["thumbnailURL"] = t }
                 if let dur = a.duration { d["duration"] = dur }
                 return d
@@ -229,8 +243,16 @@ actor ChatService {
             let counts = uploaded.reduce(into: [MessageModel.Media.Kind: Int]()) { $0[$1.kind, default: 0] += 1 }
             return counts
                 .sorted { $0.key.rawValue < $1.key.rawValue }
-                .map { kind, c in (kind == .video) ? (c > 1 ? "\(c) Videos" : "Video")
-                                 : (c > 1 ? "\(c) Photos" : "Photo") }
+                .map { kind, c in
+                    switch kind {
+                    case .image:
+                        return c > 1 ? "\(c) Photos" : "Photo"
+                    case .video:
+                        return c > 1 ? "\(c) Videos" : "Video"
+                    case .audio:
+                        return c > 1 ? "\(c) Voice messages" : "Voice message"
+                    }
+                }
                 .joined(separator: ", ")
         }()
 
@@ -417,7 +439,8 @@ actor ChatService {
             height: number(data["mediaHeight"]),
             duration: number(data["mediaDuration"]),
             localData: nil,
-            localThumbnailData: nil
+            localThumbnailData: nil,
+            localFilePath: nil
         )
     }
 
@@ -439,7 +462,8 @@ actor ChatService {
             height: number(dict["height"]),
             duration: number(dict["duration"]),
             localData: nil,
-            localThumbnailData: nil
+            localThumbnailData: nil,
+            localFilePath: nil
         )
     }
 

@@ -10,6 +10,7 @@ struct EmailVerificationView: View {
     @State private var statusIsError = false
     @State private var isSending = false
     @State private var isRefreshing = false
+    @State private var isSigningOut = false
 
     var body: some View {
         NavigationStack {
@@ -59,6 +60,21 @@ struct EmailVerificationView: View {
                     }
                     .buttonStyle(.bordered)
                     .disabled(isRefreshing)
+
+                    Button {
+                        signOut()
+                    } label: {
+                        if isSigningOut {
+                            ProgressView()
+                                .progressViewStyle(.circular)
+                                .frame(maxWidth: .infinity)
+                        } else {
+                            Text("Use a different email")
+                                .frame(maxWidth: .infinity)
+                        }
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(isSigningOut)
                 }
 
                 if let message = statusMessage {
@@ -138,6 +154,31 @@ struct EmailVerificationView: View {
 
             await MainActor.run {
                 isRefreshing = false
+            }
+        }
+    }
+
+    private func signOut() {
+        guard !isSigningOut else { return }
+
+        isSigningOut = true
+        statusMessage = nil
+        statusIsError = false
+
+        Task {
+            do {
+                try await AuthService.shared.signOut()
+            } catch {
+                await MainActor.run {
+                    statusMessage = "We couldn’t sign you out. Please try again."
+                    statusIsError = true
+                    isSigningOut = false
+                }
+                return
+            }
+
+            await MainActor.run {
+                isSigningOut = false
             }
         }
     }

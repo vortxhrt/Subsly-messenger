@@ -5,8 +5,8 @@ struct UploadedAttachment {
     let kind: MessageModel.Media.Kind
     let mediaURL: String
     let thumbnailURL: String?
-    let width: Int
-    let height: Int
+    let width: Int?
+    let height: Int?
     let duration: Double?
 
     var previewText: String {
@@ -15,6 +15,8 @@ struct UploadedAttachment {
             return "Photo"
         case .video:
             return "Video"
+        case .audio:
+            return "Voice message"
         }
     }
 }
@@ -81,6 +83,26 @@ actor AttachmentService {
                 thumbnailURL: thumbURL.absoluteString,
                 width: width,
                 height: height,
+                duration: duration
+            )
+
+        case .audio(let fileURL, let duration):
+            let fileName = UUID().uuidString + ".m4a"
+            let reference = root.child(fileName)
+            let metadata = StorageMetadata()
+            metadata.contentType = "audio/m4a"
+
+            _ = try await reference.putFileAsync(from: fileURL, metadata: metadata)
+            let url = try await reference.downloadURL()
+
+            try? FileManager.default.removeItem(at: fileURL)
+
+            return UploadedAttachment(
+                kind: .audio,
+                mediaURL: url.absoluteString,
+                thumbnailURL: nil,
+                width: nil,
+                height: nil,
                 duration: duration
             )
         }

@@ -1,0 +1,62 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function threadDoc(threadId) {
+      return firestore.get(/databases/(default)/documents/threads/$(threadId));
+    }
+
+    function threadMembers(threadId) {
+      let doc = threadDoc(threadId);
+      return doc != null && doc.data != null && doc.data.keys().hasAny(['members']) && doc.data.members is list
+        ? doc.data.members
+        : [];
+    }
+
+    function isThreadMember(threadId) {
+      return request.auth != null
+        && request.auth.uid in threadMembers(threadId);
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    match /avatars/{fileId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn()
+                   && fileId.matches('^' + request.auth.uid + '\\.(?:jpg|jpeg)$')
+                   && request.resource.contentType in ['image/jpeg']
+                   && request.resource.size < 6 * 1024 * 1024;
+      allow delete: if false;
+    }
+
+    match /threads/{threadId}/attachments/{fileName} {
+      allow read: if isThreadMember(threadId);
+
+      allow create, update: if isThreadMember(threadId)
+        && (
+          (
+            fileName.matches('^[A-Za-z0-9_-]+\\.mp4$')
+            && request.resource.contentType == 'video/mp4'
+            && request.resource.size < 40 * 1024 * 1024
+          ) ||
+          (
+            fileName.matches('^[A-Za-z0-9_-]+(?:_thumb)?\\.jpg$')
+            && request.resource.contentType == 'image/jpeg'
+            && request.resource.size < 6 * 1024 * 1024
+          ) ||
+          (
+            fileName.matches('^[A-Za-z0-9_-]+\\.m4a$')
+            && request.resource.contentType in ['audio/m4a', 'audio/mp4']
+            && request.resource.size < 12 * 1024 * 1024
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    match /{allPaths=**} {
+      allow read: if isSignedIn();
+    }
+  }
+}
