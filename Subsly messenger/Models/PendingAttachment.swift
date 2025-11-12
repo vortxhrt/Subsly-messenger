@@ -5,6 +5,7 @@ struct PendingAttachment: Identifiable, Sendable {
     enum Kind: Sendable {
         case image(data: Data, width: Int, height: Int)
         case video(fileURL: URL, thumbnailData: Data, width: Int, height: Int, duration: Double)
+        case audio(fileURL: URL, duration: Double)
     }
 
     let kind: Kind
@@ -15,6 +16,8 @@ struct PendingAttachment: Identifiable, Sendable {
             return false
         case .video:
             return true
+        case .audio:
+            return false
         }
     }
 
@@ -24,24 +27,30 @@ struct PendingAttachment: Identifiable, Sendable {
             return data
         case .video(_, let thumbnailData, _, _, _):
             return thumbnailData
+        case .audio:
+            return nil
         }
     }
 
-    var width: Int {
+    var width: Int? {
         switch kind {
         case .image(_, let width, _):
             return width
         case .video(_, _, let width, _, _):
             return width
+        case .audio:
+            return nil
         }
     }
 
-    var height: Int {
+    var height: Int? {
         switch kind {
         case .image(_, _, let height):
             return height
         case .video(_, _, _, let height, _):
             return height
+        case .audio:
+            return nil
         }
     }
 
@@ -51,6 +60,8 @@ struct PendingAttachment: Identifiable, Sendable {
             return nil
         case .video(_, _, _, _, let duration):
             return duration
+        case .audio(_, let duration):
+            return duration
         }
     }
 
@@ -59,6 +70,8 @@ struct PendingAttachment: Identifiable, Sendable {
         case .image:
             return nil
         case .video(let url, _, _, _, _):
+            return url
+        case .audio(let url, _):
             return url
         }
     }
@@ -74,7 +87,8 @@ struct PendingAttachment: Identifiable, Sendable {
                 height: Double(height),
                 duration: nil,
                 localData: data,
-                localThumbnailData: nil
+                localThumbnailData: nil,
+                localFilePath: nil
             )
         case .video(_, let thumbnailData, let width, let height, let duration):
             return MessageModel.Media(
@@ -85,7 +99,21 @@ struct PendingAttachment: Identifiable, Sendable {
                 height: Double(height),
                 duration: duration,
                 localData: nil,
-                localThumbnailData: thumbnailData
+                localThumbnailData: thumbnailData,
+                localFilePath: nil
+            )
+        case .audio(let url, let duration):
+            let data = try? Data(contentsOf: url)
+            return MessageModel.Media(
+                kind: .audio,
+                url: nil,
+                thumbnailURL: nil,
+                width: nil,
+                height: nil,
+                duration: duration,
+                localData: data,
+                localThumbnailData: nil,
+                localFilePath: url.path
             )
         }
     }

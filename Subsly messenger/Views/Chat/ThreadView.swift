@@ -61,6 +61,7 @@ struct ThreadView: View {
     @State private var mediaViewer: MediaViewerPayload?
 
     @State private var composerHeight: CGFloat = 72
+    @State private var showingVoiceRecorder = false
 
     init(currentUser: AppUser, otherUID: String) {
         self.currentUser = currentUser
@@ -188,6 +189,14 @@ struct ThreadView: View {
                         onRemoveAttachment: { attachment in
                             removePendingAttachment(attachment)
                         },
+                        onRecordVoice: {
+                            if pendingAttachments.count >= attachmentLimit {
+                                attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+                                showingAttachmentError = true
+                            } else {
+                                showingVoiceRecorder = true
+                            }
+                        },
                         onCancelReply: {
                             replyPreview = nil
                         }
@@ -195,6 +204,16 @@ struct ThreadView: View {
                 }
                 .background(.ultraThinMaterial)
                 .background(ComposerHeightReader())
+            }
+            .sheet(isPresented: $showingVoiceRecorder) {
+                VoiceRecorderSheet { attachment in
+                    if pendingAttachments.count >= attachmentLimit {
+                        attachmentErrorMessage = "You can attach up to \(attachmentLimit) items per message."
+                        showingAttachmentError = true
+                        return
+                    }
+                    pendingAttachments.append(attachment)
+                }
             }
 
             .task { await openThreadIfNeeded() }
@@ -561,6 +580,10 @@ struct ThreadView: View {
                         }
                     case .video:
                         if let thumbString = media.thumbnailURL, let url = URL(string: thumbString) {
+                            await MediaCache.shared.prefetch(url: url)
+                        }
+                    case .audio:
+                        if let urlString = media.url, let url = URL(string: urlString) {
                             await MediaCache.shared.prefetch(url: url)
                         }
                     }
