@@ -12,6 +12,9 @@ final class TypingService {
         let ref = db
             .collection("threads").document(threadId)
             .collection("presence").document(userId)
+#if DEBUG
+        FrontEndLog.typing.debug("setTyping threadId=\(threadId, privacy: .public) userId=\(userId, privacy: .public) isTyping=\(isTyping, privacy: .public)")
+#endif
 
         try await ref.setData([
             "isTyping": isTyping,
@@ -32,6 +35,9 @@ final class TypingService {
 
         return ref.addSnapshotListener { snap, _ in
             let typing = (snap?.data()?["isTyping"] as? Bool) ?? false
+#if DEBUG
+            FrontEndLog.typing.debug("listenOtherTyping snapshot threadId=\(threadId, privacy: .public) otherUser=\(otherUserId, privacy: .public) isTyping=\(typing, privacy: .public)")
+#endif
             onChange(typing)
         }
     }
