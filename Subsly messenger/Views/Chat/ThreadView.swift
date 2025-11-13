@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import FirebaseFirestore
 
@@ -31,9 +32,7 @@ struct ThreadView: View {
 
     // Pending (sending) for local-outgoing messages
     @State private var pendingOutgoingIDs: Set<String> = []
-
-    // Voice note diagnostics snapshot cache
-    @State private var voiceNoteSnapshots: [String: VoiceNoteMetadata] = [:]
+    @State private var loggedVoiceNoteIDs: Set<String> = []
 
     @State private var isOpening = false
     @State private var messageLimit: Int = 20
@@ -102,7 +101,6 @@ struct ThreadView: View {
 
                 // Keep bottom pinned and wire receipts whenever messages change.
                 .onChange(of: messages) { _ in
-                    logVoiceNotesIfNeeded(context: "messages_change")
                     hasMoreHistory = messages.count >= messageLimit
                     if isLoadingMore {
                         if let restoreId = restoreScrollToId {
@@ -130,6 +128,8 @@ struct ThreadView: View {
                     markIncomingAsRead()
                     // Clear pending IDs that no longer exist (server confirmed / replaced)
                     purgeStalePendingIDs()
+                    loggedVoiceNoteIDs = loggedVoiceNoteIDs.intersection(Set(messages.map { $0.id }))
+                    logVoiceNotesInSnapshot(context: "messages_change")
                 }
                 .onChange(of: isOtherTyping) { _ in
                     guard !isLoadingMore else { return }
@@ -184,7 +184,7 @@ struct ThreadView: View {
                 // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
                 markIncomingAsRead()
-                logVoiceNotesIfNeeded(context: "onAppear")
+                logVoiceNotesInSnapshot(context: "onAppear")
                 #if DEBUG
                 print("ThreadView appear -> myId=\(myId) otherUID=\(otherUID) threadId=\(threadId ?? "nil")")
                 #endif
@@ -324,6 +324,15 @@ struct ThreadView: View {
         }
     }
 
+    private func handleMessageTap(_ message: MessageModel) {
+        var extras: [String: String] = [:]
+        if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
+        if deliveredByOther.contains(message.id) { extras["delivered"] = "true" }
+        if readByOther.contains(message.id) { extras["read"] = "true" }
+        logVoiceNote(event: "playback_tapped", message: message, extras: extras)
+        handleTap(on: message.id)
+    }
+
     // MARK: - Sending
 
     private func send() {
@@ -331,8 +340,6 @@ struct ThreadView: View {
 
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-
-        let voiceMetadata = VoiceNoteMetadata(text: trimmed)
 
         // Create a local outgoing message with a unique id and mark as pending.
         let localId = "local-" + UUID().uuidString
@@ -346,58 +353,30 @@ struct ThreadView: View {
         messages.append(local)
         inputText = ""
 
-        if let metadata = voiceMetadata {
-            var extras: [String: String] = [
+        if voiceNoteDetails(from: local.text) != nil {
+            logVoiceNote(event: "outgoing_local_prepared", message: local, extras: [
                 "threadId": tid,
-                "senderId": myId,
-                "isOutgoing": "true"
-            ]
-            extras["messageCount"] = String(messages.count)
-            VoiceNoteDiagnostics.log(stage: .outgoingPrepared,
-                                     messageId: localId,
-                                     metadata: metadata,
-                                     context: extras)
+                "pending": "true"
+            ])
+            loggedVoiceNoteIDs.insert(localId)
         }
 
         // Fire off the real send; when it completes, clear pending for that local id.
         Task {
-            if let metadata = voiceMetadata {
-                VoiceNoteDiagnostics.log(stage: .sendRequested,
-                                         messageId: localId,
-                                         metadata: metadata,
-                                         context: [
-                                            "threadId": tid,
-                                            "senderId": myId,
-                                            "isOutgoing": "true"
-                                         ])
-            }
-
+            logVoiceNote(event: "send_requested", messageId: localId, senderId: myId, text: trimmed, extras: [
+                "threadId": tid
+            ])
             do {
                 try await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
-                if let metadata = voiceMetadata {
-                    VoiceNoteDiagnostics.log(stage: .sendSucceeded,
-                                             messageId: localId,
-                                             metadata: metadata,
-                                             context: [
-                                                "threadId": tid,
-                                                "senderId": myId,
-                                                "isOutgoing": "true"
-                                             ])
-                }
+                logVoiceNote(event: "send_succeeded", messageId: localId, senderId: myId, text: trimmed, extras: [
+                    "threadId": tid
+                ])
             } catch {
-                if let metadata = voiceMetadata {
-                    VoiceNoteDiagnostics.log(stage: .sendFailed,
-                                             messageId: localId,
-                                             metadata: metadata,
-                                             context: [
-                                                "threadId": tid,
-                                                "senderId": myId,
-                                                "isOutgoing": "true"
-                                             ],
-                                             error: error.localizedDescription)
-                }
+                logVoiceNote(event: "send_failed", messageId: localId, senderId: myId, text: trimmed, extras: [
+                    "threadId": tid,
+                    "error": error.localizedDescription
+                ])
             }
-
             await MainActor.run {
                 pendingOutgoingIDs.remove(localId)
             }
@@ -448,7 +427,7 @@ struct ThreadView: View {
         listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
                 self.messages = filteredMessages(list, threadId: threadId)
-                logVoiceNotesIfNeeded(context: "listenSnapshot")
+                self.logVoiceNotesInSnapshot(context: "listener_update")
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
@@ -582,55 +561,199 @@ private extension ThreadView {
         }
     }
 
-    func handleMessageTap(_ message: MessageModel) {
-        if let metadata = VoiceNoteMetadata(text: message.text) {
-            var extras: [String: String] = [
-                "senderId": message.senderId,
-                "isOutgoing": message.senderId == myId ? "true" : "false"
-            ]
-            if let tid = threadId { extras["threadId"] = tid }
-            if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
-            VoiceNoteDiagnostics.log(stage: .playbackTapped,
-                                     messageId: message.id,
-                                     metadata: metadata,
-                                     context: extras)
-        }
-        handleTap(on: message.id)
-    }
-
-    func logVoiceNotesIfNeeded(context: String) {
-        let currentIds = Set(messages.map { $0.id })
-        for stale in voiceNoteSnapshots.keys where !currentIds.contains(stale) {
-            voiceNoteSnapshots.removeValue(forKey: stale)
-        }
-
+    func logVoiceNotesInSnapshot(context: String) {
         for message in messages {
-            guard let metadata = VoiceNoteMetadata(text: message.text) else { continue }
-            var extras: [String: String] = [
-                "context": context,
-                "senderId": message.senderId,
-                "isOutgoing": message.senderId == myId ? "true" : "false"
-            ]
-            if let tid = threadId { extras["threadId"] = tid }
+            guard voiceNoteDetails(from: message.text) != nil else { continue }
+            guard !loggedVoiceNoteIDs.contains(message.id) else { continue }
+            var extras: [String: String] = ["context": context]
             if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
             if deliveredByOther.contains(message.id) { extras["delivered"] = "true" }
             if readByOther.contains(message.id) { extras["read"] = "true" }
-
-            if let existing = voiceNoteSnapshots[message.id] {
-                if existing != metadata {
-                    voiceNoteSnapshots[message.id] = metadata
-                    VoiceNoteDiagnostics.log(stage: .snapshotUpdated,
-                                             messageId: message.id,
-                                             metadata: metadata,
-                                             context: extras)
-                }
-            } else {
-                voiceNoteSnapshots[message.id] = metadata
-                VoiceNoteDiagnostics.log(stage: .snapshotFirstSeen,
-                                         messageId: message.id,
-                                         metadata: metadata,
-                                         context: extras)
-            }
+            logVoiceNote(event: "snapshot_seen", message: message, extras: extras)
+            loggedVoiceNoteIDs.insert(message.id)
         }
     }
+
+    func logVoiceNote(event: String, message: MessageModel, extras: [String: String] = [:]) {
+        var combined = extras
+        if let created = message.createdAt {
+            combined["createdAt"] = Self.logDateFormatter.string(from: created)
+        }
+        logVoiceNote(event: event,
+                     messageId: message.id,
+                     senderId: message.senderId,
+                     text: message.text,
+                     extras: combined)
+    }
+
+    func logVoiceNote(event: String, messageId: String, senderId: String, text: String, extras: [String: String] = [:]) {
+        guard let details = voiceNoteDetails(from: text) else { return }
+        var components: [String] = [
+            "[VoiceNote]",
+            event,
+            "messageId=\(messageId)",
+            "senderId=\(senderId)",
+            "direction=\(senderId == myId ? "outgoing" : "incoming")"
+        ]
+
+        var mergedFields = details.fields
+        for (key, value) in extras {
+            mergedFields[key] = value
+        }
+
+        for (key, value) in mergedFields.sorted(by: { $0.key < $1.key }) {
+            components.append("\(key)=\(value)")
+        }
+
+        components.append("payload=\(details.summary)")
+        print(components.joined(separator: " | "))
+    }
+
+    func voiceNoteDetails(from text: String) -> VoiceNoteDetails? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let data = trimmed.data(using: .utf8),
+           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            var lowered: [String: Any] = [:]
+            for (key, value) in json {
+                let loweredKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                lowered[loweredKey] = value
+            }
+
+            let typeCandidates = ["type", "messagetype", "kind", "category", "mediatype"]
+            let typeValue = firstString(for: typeCandidates, in: lowered)
+            let audioURL = firstString(for: ["audiourl", "voiceurl", "voicenoteurl", "url", "remoteurl", "downloadurl", "mediaurl"], in: lowered)
+            let localRef = firstString(for: ["localpath", "localurl", "localreference", "file", "filepath"], in: lowered)
+            let duration = firstNumericString(for: ["duration", "durationseconds", "length", "lengthseconds", "audiolength"], in: lowered)
+            let fileSize = firstNumericString(for: ["filesize", "size", "filesizebytes"], in: lowered)
+            let waveformCount = waveformDescription(from: lowered)
+            let codec = firstString(for: ["mimetype", "codec", "audiocodec", "contenttype"], in: lowered)
+            let voiceFlag = isTruthy(lowered["isvoice"]) || isTruthy(lowered["voice"]) || isTruthy(lowered["voicenote"]) || isTruthy(lowered["isvoicenote"])
+
+            let looksLikeVoice = voiceFlag || typeValue?.lowercased().contains("voice") == true
+            let looksLikeAudio = typeValue?.lowercased().contains("audio") == true
+            if looksLikeVoice || audioURL != nil || localRef != nil || looksLikeAudio {
+                var fields: [String: String] = [:]
+                if let typeValue { fields["type"] = typeValue }
+                if let audioURL { fields["audioURL"] = audioURL }
+                if let localRef { fields["local"] = localRef }
+                if let duration { fields["duration"] = duration }
+                if let fileSize { fields["fileSize"] = fileSize }
+                if let waveformCount { fields["waveform"] = waveformCount }
+                if let codec { fields["codec"] = codec }
+
+                let summary: String
+                if let compact = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
+                   let string = String(data: compact, encoding: .utf8) {
+                    summary = truncated(string)
+                } else {
+                    summary = truncated(trimmed)
+                }
+
+                return VoiceNoteDetails(summary: summary, fields: fields)
+            }
+        }
+
+        let lower = trimmed.lowercased()
+        let keywords = ["voice_note", "voice-note", "voicenote", "\"voice\"", "\"audio\""]
+        let extensions = [".m4a", ".aac", ".mp3", ".wav", ".caf", ".ogg"]
+        let containsKeyword = keywords.contains { lower.contains($0) }
+        let containsExtension = extensions.contains { lower.contains($0) }
+
+        if containsKeyword || containsExtension {
+            return VoiceNoteDetails(summary: truncated(trimmed), fields: [:])
+        }
+
+        return nil
+    }
+
+    func firstString(for keys: [String], in dictionary: [String: Any]) -> String? {
+        for key in keys {
+            if let value = dictionary[key] {
+                if let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    return string
+                }
+                if let number = value as? NSNumber {
+                    return number.stringValue
+                }
+            }
+        }
+        return nil
+    }
+
+    func firstNumericString(for keys: [String], in dictionary: [String: Any]) -> String? {
+        for key in keys {
+            if let value = dictionary[key], let numeric = numericString(from: value) {
+                return numeric
+            }
+        }
+        return nil
+    }
+
+    func waveformDescription(from dictionary: [String: Any]) -> String? {
+        let waveformKeys = ["waveform", "waveformpoints", "samples"]
+        for key in waveformKeys {
+            if let value = dictionary[key] {
+                if let array = value as? [Any] {
+                    return "count=\(array.count)"
+                }
+                if let number = value as? NSNumber {
+                    return number.stringValue
+                }
+                if let string = value as? String, !string.isEmpty {
+                    return string
+                }
+            }
+        }
+        return nil
+    }
+
+    func numericString(from value: Any) -> String? {
+        switch value {
+        case let number as NSNumber:
+            return number.stringValue
+        case let string as String:
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+            if Double(trimmed) != nil {
+                return trimmed
+            }
+            return nil
+        default:
+            return nil
+        }
+    }
+
+    func isTruthy(_ value: Any?) -> Bool {
+        switch value {
+        case let bool as Bool:
+            return bool
+        case let number as NSNumber:
+            return number.boolValue
+        case let string as String:
+            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["true", "1", "yes", "y"].contains(trimmed)
+        default:
+            return false
+        }
+    }
+
+    func truncated(_ text: String, limit: Int = 400) -> String {
+        if text.count <= limit {
+            return text
+        }
+        let endIndex = text.index(text.startIndex, offsetBy: limit)
+        return "\(text[..<endIndex])…(+\(text.count - limit) chars)"
+    }
+
+    private struct VoiceNoteDetails {
+        let summary: String
+        let fields: [String: String]
+    }
+
+    static let logDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }
