@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 import AVFoundation
 import CryptoKit
 
@@ -52,7 +53,7 @@ final class VoiceMessagePlaybackController: NSObject, ObservableObject {
         case .loading:
             break
         case .idle, .failed:
-            Task { @MainActor [weak self] in
+            Task { [weak self] in
                 guard let self else { return }
                 await self.startPlayback(url: url, cacheKey: cacheKey, expectedDuration: expectedDuration)
             }
