@@ -112,15 +112,16 @@ final class VoiceMessagePlaybackController: NSObject, ObservableObject {
 
     private func startTimer() {
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self, let player = self.player else { return }
-            self.currentTime = player.currentTime
-            if player.duration > 0 {
-                self.duration = max(self.duration, player.duration)
-            }
-        }
-        if let timer {
-            RunLoop.main.add(timer, forMode: .common)
+        let timer = Timer(timeInterval: 0.1, target: self, selector: #selector(handleTimer(_:)), userInfo: nil, repeats: true)
+        self.timer = timer
+        RunLoop.main.add(timer, forMode: .common)
+    }
+
+    @objc private func handleTimer(_ timer: Timer) {
+        guard let player else { return }
+        currentTime = player.currentTime
+        if player.duration > 0 {
+            duration = max(duration, player.duration)
         }
     }
 
