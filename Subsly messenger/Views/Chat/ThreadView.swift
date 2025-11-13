@@ -32,6 +32,9 @@ struct ThreadView: View {
     // Pending (sending) for local-outgoing messages
     @State private var pendingOutgoingIDs: Set<String> = []
 
+    // Voice note diagnostics snapshot cache
+    @State private var voiceNoteSnapshots: [String: VoiceNoteMetadata] = [:]
+
     @State private var isOpening = false
     @State private var messageLimit: Int = 20
     private let pageSize: Int = 20
@@ -81,7 +84,7 @@ struct ThreadView: View {
                                 createdAt: msg.createdAt,
                                 isExpanded: expandedMessageIDs.contains(msg.id),
                                 status: statusForMessage(msg),
-                                onTap: { handleTap(on: msg.id) }
+                                onTap: { handleMessageTap(msg) }
                             )
                         }
 
@@ -99,6 +102,7 @@ struct ThreadView: View {
 
                 // Keep bottom pinned and wire receipts whenever messages change.
                 .onChange(of: messages) { _ in
+                    logVoiceNotesIfNeeded(context: "messages_change")
                     hasMoreHistory = messages.count >= messageLimit
                     if isLoadingMore {
                         if let restoreId = restoreScrollToId {
@@ -180,6 +184,7 @@ struct ThreadView: View {
                 // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
                 markIncomingAsRead()
+                logVoiceNotesIfNeeded(context: "onAppear")
                 #if DEBUG
                 print("ThreadView appear -> myId=\(myId) otherUID=\(otherUID) threadId=\(threadId ?? "nil")")
                 #endif
@@ -327,6 +332,8 @@ struct ThreadView: View {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
+        let voiceMetadata = VoiceNoteMetadata(text: trimmed)
+
         // Create a local outgoing message with a unique id and mark as pending.
         let localId = "local-" + UUID().uuidString
         let local = MessageModel(
@@ -339,9 +346,58 @@ struct ThreadView: View {
         messages.append(local)
         inputText = ""
 
+        if let metadata = voiceMetadata {
+            var extras: [String: String] = [
+                "threadId": tid,
+                "senderId": myId,
+                "isOutgoing": "true"
+            ]
+            extras["messageCount"] = String(messages.count)
+            VoiceNoteDiagnostics.log(stage: .outgoingPrepared,
+                                     messageId: localId,
+                                     metadata: metadata,
+                                     context: extras)
+        }
+
         // Fire off the real send; when it completes, clear pending for that local id.
         Task {
-            try? await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
+            if let metadata = voiceMetadata {
+                VoiceNoteDiagnostics.log(stage: .sendRequested,
+                                         messageId: localId,
+                                         metadata: metadata,
+                                         context: [
+                                            "threadId": tid,
+                                            "senderId": myId,
+                                            "isOutgoing": "true"
+                                         ])
+            }
+
+            do {
+                try await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
+                if let metadata = voiceMetadata {
+                    VoiceNoteDiagnostics.log(stage: .sendSucceeded,
+                                             messageId: localId,
+                                             metadata: metadata,
+                                             context: [
+                                                "threadId": tid,
+                                                "senderId": myId,
+                                                "isOutgoing": "true"
+                                             ])
+                }
+            } catch {
+                if let metadata = voiceMetadata {
+                    VoiceNoteDiagnostics.log(stage: .sendFailed,
+                                             messageId: localId,
+                                             metadata: metadata,
+                                             context: [
+                                                "threadId": tid,
+                                                "senderId": myId,
+                                                "isOutgoing": "true"
+                                             ],
+                                             error: error.localizedDescription)
+                }
+            }
+
             await MainActor.run {
                 pendingOutgoingIDs.remove(localId)
             }
@@ -392,6 +448,7 @@ struct ThreadView: View {
         listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
                 self.messages = filteredMessages(list, threadId: threadId)
+                logVoiceNotesIfNeeded(context: "listenSnapshot")
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
@@ -522,6 +579,58 @@ private extension ThreadView {
         guard let sessionId = session.currentUser?.id, !sessionId.isEmpty else { return }
         if myId != sessionId {
             myId = sessionId
+        }
+    }
+
+    func handleMessageTap(_ message: MessageModel) {
+        if let metadata = VoiceNoteMetadata(text: message.text) {
+            var extras: [String: String] = [
+                "senderId": message.senderId,
+                "isOutgoing": message.senderId == myId ? "true" : "false"
+            ]
+            if let tid = threadId { extras["threadId"] = tid }
+            if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
+            VoiceNoteDiagnostics.log(stage: .playbackTapped,
+                                     messageId: message.id,
+                                     metadata: metadata,
+                                     context: extras)
+        }
+        handleTap(on: message.id)
+    }
+
+    func logVoiceNotesIfNeeded(context: String) {
+        let currentIds = Set(messages.map { $0.id })
+        for stale in voiceNoteSnapshots.keys where !currentIds.contains(stale) {
+            voiceNoteSnapshots.removeValue(forKey: stale)
+        }
+
+        for message in messages {
+            guard let metadata = VoiceNoteMetadata(text: message.text) else { continue }
+            var extras: [String: String] = [
+                "context": context,
+                "senderId": message.senderId,
+                "isOutgoing": message.senderId == myId ? "true" : "false"
+            ]
+            if let tid = threadId { extras["threadId"] = tid }
+            if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
+            if deliveredByOther.contains(message.id) { extras["delivered"] = "true" }
+            if readByOther.contains(message.id) { extras["read"] = "true" }
+
+            if let existing = voiceNoteSnapshots[message.id] {
+                if existing != metadata {
+                    voiceNoteSnapshots[message.id] = metadata
+                    VoiceNoteDiagnostics.log(stage: .snapshotUpdated,
+                                             messageId: message.id,
+                                             metadata: metadata,
+                                             context: extras)
+                }
+            } else {
+                voiceNoteSnapshots[message.id] = metadata
+                VoiceNoteDiagnostics.log(stage: .snapshotFirstSeen,
+                                         messageId: message.id,
+                                         metadata: metadata,
+                                         context: extras)
+            }
         }
     }
 }
