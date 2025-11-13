@@ -353,7 +353,7 @@ struct ThreadView: View {
         messages.append(local)
         inputText = ""
 
-        if voiceNoteDetails(from: local.text) != nil {
+        if voiceNoteMetadata(from: local.text) != nil {
             logVoiceNote(event: "outgoing_local_prepared", message: local, extras: [
                 "threadId": tid,
                 "pending": "true"
@@ -563,7 +563,7 @@ private extension ThreadView {
 
     func logVoiceNotesInSnapshot(context: String) {
         for message in messages {
-            guard voiceNoteDetails(from: message.text) != nil else { continue }
+            guard voiceNoteMetadata(from: message.text) != nil else { continue }
             guard !loggedVoiceNoteIDs.contains(message.id) else { continue }
             var extras: [String: String] = ["context": context]
             if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
@@ -587,168 +587,124 @@ private extension ThreadView {
     }
 
     func logVoiceNote(event: String, messageId: String, senderId: String, text: String, extras: [String: String] = [:]) {
-        guard let details = voiceNoteDetails(from: text) else { return }
-        var components: [String] = [
-            "[VoiceNote]",
-            event,
-            "messageId=\(messageId)",
-            "senderId=\(senderId)",
-            "direction=\(senderId == myId ? "outgoing" : "incoming")"
-        ]
+        guard let metadata = voiceNoteMetadata(from: text) else { return }
 
-        var mergedFields = details.fields
+        var fields = metadata.fields
         for (key, value) in extras {
-            mergedFields[key] = value
+            fields[key] = value
         }
 
-        for (key, value) in mergedFields.sorted(by: { $0.key < $1.key }) {
+        var components: [String] = ["[VoiceNote]", event]
+        components.append("messageId=\(messageId)")
+        components.append("senderId=\(senderId)")
+        let direction = senderId == myId ? "outgoing" : "incoming"
+        components.append("direction=\(direction)")
+
+        for (key, value) in fields.sorted(by: { $0.key < $1.key }) {
             components.append("\(key)=\(value)")
         }
 
-        components.append("payload=\(details.summary)")
+        components.append("payload=\(metadata.summary)")
         print(components.joined(separator: " | "))
     }
 
-    func voiceNoteDetails(from text: String) -> VoiceNoteDetails? {
+    func voiceNoteMetadata(from text: String) -> VoiceNoteMetadata? {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return nil }
 
-        if let data = trimmed.data(using: .utf8),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            var lowered: [String: Any] = [:]
-            for (key, value) in json {
-                let loweredKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                lowered[loweredKey] = value
-            }
-
-            let typeCandidates = ["type", "messagetype", "kind", "category", "mediatype"]
-            let typeValue = firstString(for: typeCandidates, in: lowered)
-            let audioURL = firstString(for: ["audiourl", "voiceurl", "voicenoteurl", "url", "remoteurl", "downloadurl", "mediaurl"], in: lowered)
-            let localRef = firstString(for: ["localpath", "localurl", "localreference", "file", "filepath"], in: lowered)
-            let duration = firstNumericString(for: ["duration", "durationseconds", "length", "lengthseconds", "audiolength"], in: lowered)
-            let fileSize = firstNumericString(for: ["filesize", "size", "filesizebytes"], in: lowered)
-            let waveformCount = waveformDescription(from: lowered)
-            let codec = firstString(for: ["mimetype", "codec", "audiocodec", "contenttype"], in: lowered)
-            let voiceFlag = isTruthy(lowered["isvoice"]) || isTruthy(lowered["voice"]) || isTruthy(lowered["voicenote"]) || isTruthy(lowered["isvoicenote"])
-
-            let looksLikeVoice = voiceFlag || typeValue?.lowercased().contains("voice") == true
-            let looksLikeAudio = typeValue?.lowercased().contains("audio") == true
-            if looksLikeVoice || audioURL != nil || localRef != nil || looksLikeAudio {
-                var fields: [String: String] = [:]
-                if let typeValue { fields["type"] = typeValue }
-                if let audioURL { fields["audioURL"] = audioURL }
-                if let localRef { fields["local"] = localRef }
-                if let duration { fields["duration"] = duration }
-                if let fileSize { fields["fileSize"] = fileSize }
-                if let waveformCount { fields["waveform"] = waveformCount }
-                if let codec { fields["codec"] = codec }
-
-                let summary: String
-                if let compact = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]),
-                   let string = String(data: compact, encoding: .utf8) {
-                    summary = truncated(string)
-                } else {
-                    summary = truncated(trimmed)
-                }
-
-                return VoiceNoteDetails(summary: summary, fields: fields)
-            }
+        if let jsonMetadata = jsonVoiceNoteMetadata(from: trimmed) {
+            return jsonMetadata
         }
 
-        let lower = trimmed.lowercased()
-        let keywords = ["voice_note", "voice-note", "voicenote", "\"voice\"", "\"audio\""]
-        let extensions = [".m4a", ".aac", ".mp3", ".wav", ".caf", ".ogg"]
-        let containsKeyword = keywords.contains { lower.contains($0) }
-        let containsExtension = extensions.contains { lower.contains($0) }
+        let lowercased = trimmed.lowercased()
+        let keywordHit = ["voice_note", "voice-note", "voicenote", "voice note", "audio message"]
+            .contains(where: { lowercased.contains($0) })
+        if keywordHit {
+            return VoiceNoteMetadata(summary: truncated(trimmed), fields: [:])
+        }
 
-        if containsKeyword || containsExtension {
-            return VoiceNoteDetails(summary: truncated(trimmed), fields: [:])
+        let audioExtensions = [".m4a", ".aac", ".mp3", ".wav", ".caf", ".ogg"]
+        for ext in audioExtensions where lowercased.contains(ext) {
+            return VoiceNoteMetadata(summary: truncated(trimmed), fields: [:])
         }
 
         return nil
     }
 
-    func firstString(for keys: [String], in dictionary: [String: Any]) -> String? {
-        for key in keys {
-            if let value = dictionary[key] {
-                if let string = value as? String, !string.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    return string
-                }
-                if let number = value as? NSNumber {
-                    return number.stringValue
-                }
+    func jsonVoiceNoteMetadata(from text: String) -> VoiceNoteMetadata? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) else { return nil }
+        guard let rawDictionary = object as? [String: Any] else { return nil }
+
+        var lowered: [String: Any] = [:]
+        for (key, value) in rawDictionary {
+            let cleanedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            lowered[cleanedKey] = value
+        }
+
+        var summaryFields: [String: String] = [:]
+        var isVoiceCandidate = false
+
+        if let typeValue = lowered["type"] as? String {
+            summaryFields["type"] = typeValue
+            let loweredType = typeValue.lowercased()
+            if loweredType.contains("voice") || loweredType.contains("audio") {
+                isVoiceCandidate = true
             }
         }
-        return nil
-    }
 
-    func firstNumericString(for keys: [String], in dictionary: [String: Any]) -> String? {
-        for key in keys {
-            if let value = dictionary[key], let numeric = numericString(from: value) {
-                return numeric
+        let urlKeys = ["audiourl", "voiceurl", "voicenoteurl", "url", "remoteurl", "downloadurl", "mediaurl"]
+        for key in urlKeys {
+            if let value = lowered[key] as? String, !value.isEmpty {
+                summaryFields["url"] = value
+                if value.lowercased().contains("voice") { isVoiceCandidate = true }
+                break
             }
         }
-        return nil
-    }
 
-    func waveformDescription(from dictionary: [String: Any]) -> String? {
-        let waveformKeys = ["waveform", "waveformpoints", "samples"]
-        for key in waveformKeys {
-            if let value = dictionary[key] {
-                if let array = value as? [Any] {
-                    return "count=\(array.count)"
-                }
-                if let number = value as? NSNumber {
-                    return number.stringValue
-                }
-                if let string = value as? String, !string.isEmpty {
-                    return string
-                }
+        let localKeys = ["localpath", "localurl", "localreference", "file", "filepath"]
+        for key in localKeys {
+            if let value = lowered[key] as? String, !value.isEmpty {
+                summaryFields["local"] = value
+                isVoiceCandidate = true
+                break
             }
         }
-        return nil
-    }
 
-    func numericString(from value: Any) -> String? {
-        switch value {
-        case let number as NSNumber:
-            return number.stringValue
-        case let string as String:
-            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
-            if Double(trimmed) != nil {
-                return trimmed
-            }
-            return nil
-        default:
-            return nil
+        if let durationNumber = lowered["duration"] as? NSNumber {
+            summaryFields["duration"] = durationNumber.stringValue
+            isVoiceCandidate = true
+        } else if let durationString = lowered["duration"] as? String, !durationString.isEmpty {
+            summaryFields["duration"] = durationString
+            isVoiceCandidate = true
         }
-    }
 
-    func isTruthy(_ value: Any?) -> Bool {
-        switch value {
-        case let bool as Bool:
-            return bool
-        case let number as NSNumber:
-            return number.boolValue
-        case let string as String:
-            let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-            return ["true", "1", "yes", "y"].contains(trimmed)
-        default:
-            return false
+        if let voiceFlag = lowered["isvoice"] as? Bool, voiceFlag { isVoiceCandidate = true }
+        if let voiceFlag = lowered["voicenote"] as? Bool, voiceFlag { isVoiceCandidate = true }
+        if let voiceFlag = lowered["isvoicenote"] as? Bool, voiceFlag { isVoiceCandidate = true }
+
+        guard isVoiceCandidate else { return nil }
+
+        let summaryText: String
+        if let compact = try? JSONSerialization.data(withJSONObject: rawDictionary, options: [.sortedKeys]),
+           let asString = String(data: compact, encoding: .utf8) {
+            summaryText = truncated(asString)
+        } else {
+            summaryText = truncated(text)
         }
+
+        return VoiceNoteMetadata(summary: summaryText, fields: summaryFields)
     }
 
     func truncated(_ text: String, limit: Int = 400) -> String {
-        if text.count <= limit {
-            return text
-        }
+        guard text.count > limit else { return text }
         let endIndex = text.index(text.startIndex, offsetBy: limit)
         return "\(text[..<endIndex])…(+\(text.count - limit) chars)"
     }
 
-    private struct VoiceNoteDetails {
+    private struct VoiceNoteMetadata {
         let summary: String
-        let fields: [String: String]
+        var fields: [String: String]
     }
 
     static let logDateFormatter: ISO8601DateFormatter = {
