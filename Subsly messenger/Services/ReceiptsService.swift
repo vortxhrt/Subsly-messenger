@@ -15,6 +15,9 @@ final class ReceiptsService {
     func markDelivered(threadId: String, messageId: String, to uid: String) async {
         let ref = db.collection("threads").document(threadId)
             .collection("messages").document(messageId)
+#if DEBUG
+        FrontEndLog.receipts.debug("markDelivered start threadId=\(threadId, privacy: .public) messageId=\(messageId, privacy: .public) to=\(uid, privacy: .public)")
+#endif
         do {
             try await ref.updateData([
                 "deliveredTo": FieldValue.arrayUnion([uid])
@@ -23,7 +26,9 @@ final class ReceiptsService {
             do {
                 try await ref.setData(["deliveredTo": [uid]], merge: true)
             } catch {
-                print("⚠️ markDelivered failed: \(error.localizedDescription)")
+#if DEBUG
+                FrontEndLog.receipts.error("markDelivered failed threadId=\(threadId, privacy: .public) messageId=\(messageId, privacy: .public) uid=\(uid, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+#endif
             }
         }
     }
@@ -32,6 +37,9 @@ final class ReceiptsService {
     func markRead(threadId: String, messageId: String, by uid: String) async {
         let ref = db.collection("threads").document(threadId)
             .collection("messages").document(messageId)
+#if DEBUG
+        FrontEndLog.receipts.debug("markRead start threadId=\(threadId, privacy: .public) messageId=\(messageId, privacy: .public) by=\(uid, privacy: .public)")
+#endif
         do {
             try await ref.updateData([
                 "readBy": FieldValue.arrayUnion([uid]),
@@ -44,7 +52,9 @@ final class ReceiptsService {
                     "deliveredTo": [uid]
                 ], merge: true)
             } catch {
-                print("⚠️ markRead failed: \(error.localizedDescription)")
+#if DEBUG
+                FrontEndLog.receipts.error("markRead failed threadId=\(threadId, privacy: .public) messageId=\(messageId, privacy: .public) uid=\(uid, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+#endif
             }
         }
     }
@@ -61,6 +71,9 @@ final class ReceiptsService {
         return ref.addSnapshotListener { snap, _ in
             let delivered = (snap?.get("deliveredTo") as? [String]) ?? []
             let read = (snap?.get("readBy") as? [String]) ?? []
+#if DEBUG
+            FrontEndLog.receipts.debug("listenReceipts snapshot threadId=\(threadId, privacy: .public) messageId=\(messageId, privacy: .public) delivered=\(delivered.joined(separator: ","), privacy: .public) read=\(read.joined(separator: ","), privacy: .public)")
+#endif
             onChange(Set(delivered), Set(read))
         }
     }
