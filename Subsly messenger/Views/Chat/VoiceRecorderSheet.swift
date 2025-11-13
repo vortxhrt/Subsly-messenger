@@ -210,13 +210,14 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
     private var recordTimer: Timer?
     private var playbackTimer: Timer?
 
+    // MARK: - Public API
+
     func startRecording() async {
         guard state != .recording else { return }
         errorMessage = nil
         stopPlayback()
         cleanupRecordingFile()
 
-        let session = AVAudioSession.sharedInstance()
         let granted = await Self.requestPermission()
         guard granted else {
             errorMessage = "Microphone access is required to record voice messages."
@@ -224,8 +225,7 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         }
 
         do {
-            try session.setCategory(.playAndRecord, mode: .spokenAudio, options: [.duckOthers, .defaultToSpeaker])
-            try session.setActive(true, options: [])
+            try AppAudioSession.shared.activate(.recording)
 
             let url = FileManager.default.temporaryDirectory
                 .appendingPathComponent("voice-temp-\(UUID().uuidString).m4a")
@@ -238,13 +238,15 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
                 AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue
             ]
 
-            recorder = try AVAudioRecorder(url: url, settings: settings)
-            recorder?.delegate = self
-            recorder?.prepareToRecord()
-            guard recorder?.record() == true else {
+            let recorder = try AVAudioRecorder(url: url, settings: settings)
+            recorder.delegate = self
+            recorder.prepareToRecord()
+
+            guard recorder.record() else {
                 throw NSError(domain: "VoiceRecorder", code: -1)
             }
 
+            self.recorder = recorder
             state = .recording
             elapsed = 0
             playbackPosition = 0
@@ -255,21 +257,20 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
             recorder?.stop()
             recorder = nil
             errorMessage = "We couldn’t start recording. Please try again."
-            try? session.setActive(false, options: [.notifyOthersOnDeactivation])
+            AppAudioSession.shared.deactivate()
         }
     }
 
     func stopRecording(dueToLimit: Bool = false) {
-        guard state == .recording, let recorder else { return }
-        recorder.stop()
-        let measuredDuration = recorder.currentTime
+        guard state == .recording else { return }
+        let measuredDuration = recorder?.currentTime ?? 0
+        recorder?.stop()
         let duration = max(measuredDuration, elapsed)
-        recordingURL = recorder.url
         recordingDuration = duration
         elapsed = duration
         stopRecordTimer()
-        self.recorder = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        recorder = nil
+        AppAudioSession.shared.deactivate()
 
         if recordingDuration < minimumDuration {
             errorMessage = "Recording was too short. Try again."
@@ -281,7 +282,9 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         }
 
         playbackPosition = 0
-        if dueToLimit { errorMessage = "Voice messages can be up to 2 minutes long." }
+        if dueToLimit {
+            errorMessage = "Voice messages can be up to 2 minutes long."
+        }
         state = .reviewing
     }
 
@@ -309,7 +312,7 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         recorder?.stop()
         recorder = nil
         cleanupRecordingFile()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AppAudioSession.shared.deactivate()
     }
 
     func exportAttachment() throws -> PendingAttachment {
@@ -323,17 +326,21 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         return PendingAttachment(kind: .audio(fileURL: destination, duration: recordingDuration))
     }
 
+    // MARK: - Playback
+
     private func startPlayback() {
         guard let url = recordingURL else { return }
+
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.duckOthers, .defaultToSpeaker])
-            try session.setActive(true, options: [])
+            try AppAudioSession.shared.activate(.playback)
 
             let player = try AVAudioPlayer(contentsOf: url)
             player.delegate = self
             player.prepareToPlay()
-            player.play()
+
+            guard player.play() else {
+                throw NSError(domain: "VoiceRecorder", code: -2)
+            }
 
             self.player = player
             isPlayingBack = true
@@ -341,17 +348,20 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         } catch {
             errorMessage = "We couldn’t play back the recording."
             isPlayingBack = false
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            AppAudioSession.shared.deactivate()
         }
     }
 
     private func stopPlayback() {
-        player?.stop()
-        player = nil
+        guard let player else { return }
+        player.stop()
+        self.player = nil
         isPlayingBack = false
         stopPlaybackTimer()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AppAudioSession.shared.deactivate()
     }
+
+    // MARK: - File management
 
     private func cleanupRecordingFile() {
         if let url = recordingURL {
@@ -359,6 +369,8 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
             recordingURL = nil
         }
     }
+
+    // MARK: - Timers
 
     private func startRecordTimer() {
         stopRecordTimer()
@@ -398,7 +410,7 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
         isPlayingBack = false
         playbackPosition = recordingDuration
         stopPlaybackTimer()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AppAudioSession.shared.deactivate()
     }
 
     // MARK: - Helpers
@@ -425,5 +437,36 @@ final class VoiceRecorderViewModel: NSObject, ObservableObject, AVAudioRecorderD
             case .noRecording: return "You need to record a message before sending."
             }
         }
+    }
+}
+
+/// Shared audio session helper used by both the recorder
+/// AND (you should also use it) by your in-chat audio message player.
+final class AppAudioSession {
+    static let shared = AppAudioSession()
+    private init() {}
+
+    enum Mode {
+        case recording
+        case playback
+    }
+
+    func activate(_ mode: Mode) throws {
+        let session = AVAudioSession.sharedInstance()
+
+        // One category for everything to keep `defaultToSpeaker` valid on device.
+        // Using `.playAndRecord` instead of `.playback` avoids OSStatus -50 when combining with `defaultToSpeaker`.
+        var options: AVAudioSession.CategoryOptions = [.duckOthers, .defaultToSpeaker]
+        options.insert(.allowBluetooth)
+
+        try session.setCategory(.playAndRecord,
+                                mode: .spokenAudio,
+                                options: options)
+        try session.setActive(true, options: [])
+    }
+
+    func deactivate() {
+        let session = AVAudioSession.sharedInstance()
+        try? session.setActive(false, options: [.notifyOthersOnDeactivation])
     }
 }
