@@ -53,7 +53,7 @@ final class VoiceMessagePlaybackController: NSObject, ObservableObject {
         case .loading:
             break
         case .idle, .failed:
-            Task { [weak self] in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 await self.startPlayback(url: url, cacheKey: cacheKey, expectedDuration: expectedDuration)
             }
