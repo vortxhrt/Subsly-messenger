@@ -1,10 +1,9 @@
 import Foundation
-import Combine
 import AVFoundation
 import CryptoKit
 
 @MainActor
-final class VoiceMessagePlaybackController: NSObject, ObservableObject {
+final class VoiceMessagePlaybackController: NSObject, ObservableObject, AVAudioPlayerDelegate {
     enum State: Equatable {
         case idle
         case loading
@@ -164,9 +163,6 @@ final class VoiceMessagePlaybackController: NSObject, ObservableObject {
         player?.stop()
         deactivateSession()
     }
-}
-
-extension VoiceMessagePlaybackController: AVAudioPlayerDelegate {
     func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         stopTimer()
         currentTime = duration
