@@ -1,6 +1,7 @@
 import Foundation
 import FirebaseCore
 import FirebaseFirestore
+import FirebaseStorage
 
 // ListenerRegistration is @MainActor, so make this class @MainActor too.
 @MainActor
@@ -57,6 +58,48 @@ actor ChatService {
         ])
     }
 
+    func sendAudioMessage(threadId: String,
+                          from senderId: String,
+                          fileURL: URL,
+                          duration: TimeInterval,
+                          waveform: [Double] = []) async throws {
+        guard let threadsCol = await threadsCollection() else {
+            print("✈️ Offline/local mode: not sending audio message.")
+            return
+        }
+
+        let storageRef = Storage.storage()
+            .reference()
+            .child("voice_messages/\(threadId)/\(UUID().uuidString).m4a")
+
+        let metadata = StorageMetadata()
+        metadata.contentType = "audio/m4a"
+
+        _ = try await storageRef.putFileAsync(from: fileURL, metadata: metadata)
+        let downloadURL = try await storageRef.downloadURL()
+
+        let messageId = threadsCol.document(threadId).collection("messages").document().documentID
+        let msgRef = threadsCol.document(threadId).collection("messages").document(messageId)
+
+        var payload: [String: Any] = [
+            "senderId": senderId,
+            "text": "",
+            "audioURL": downloadURL.absoluteString,
+            "audioDuration": duration,
+            "createdAt": FieldValue.serverTimestamp()
+        ]
+        if !waveform.isEmpty {
+            payload["waveform"] = waveform
+        }
+
+        try await msgRef.setData(payload, merge: true)
+
+        try await threadsCol.document(threadId).updateData([
+            "lastMessagePreview": "Voice message",
+            "updatedAt": FieldValue.serverTimestamp()
+        ])
+    }
+
     // MARK: Listeners (run on main actor to match ListenerRegistration)
     @MainActor
     func listenThreads(for uid: String,
@@ -106,11 +149,18 @@ actor ChatService {
             let models: [MessageModel] = snap.documents.map { doc in
                 let data = doc.data()
                 let ts = (data["createdAt"] as? Timestamp)?.dateValue()
+                let audioURLString = data["audioURL"] as? String
+                let audioURL = audioURLString.flatMap(URL.init(string:))
+                let duration = data["audioDuration"] as? TimeInterval
+                let waveform = data["waveform"] as? [Double] ?? []
                 return MessageModel(
                     id: doc.documentID,
                     senderId: data["senderId"] as? String ?? "",
                     text: data["text"] as? String ?? "",
-                    createdAt: ts
+                    createdAt: ts,
+                    audioURL: audioURL,
+                    audioDuration: duration,
+                    waveform: waveform
                 )
             }
             onChange(models)

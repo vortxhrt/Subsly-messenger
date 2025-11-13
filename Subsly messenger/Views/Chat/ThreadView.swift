@@ -75,14 +75,7 @@ struct ThreadView: View {
                         }
 
                         ForEach(messages, id: \.id) { msg in
-                            MessageBubbleView(
-                                text: msg.text,
-                                isMe: msg.senderId == myId,
-                                createdAt: msg.createdAt,
-                                isExpanded: expandedMessageIDs.contains(msg.id),
-                                status: statusForMessage(msg),
-                                onTap: { handleTap(on: msg.id) }
-                            )
+                            messageContent(for: msg)
                         }
 
                         if isOtherTyping {
@@ -200,6 +193,32 @@ struct ThreadView: View {
         .onChange(of: session.currentUser?.id) { _ in syncMyIdFromSession() }
         .onChange(of: myId) { _ in
             Task { await openThreadIfNeeded() }
+        }
+    }
+
+    @ViewBuilder
+    private func messageContent(for msg: MessageModel) -> some View {
+        if msg.isAudioMessage {
+            VoiceMessageBubbleView(
+                messageId: msg.id,
+                isMe: msg.senderId == myId,
+                createdAt: msg.createdAt,
+                isExpanded: expandedMessageIDs.contains(msg.id),
+                status: statusForMessage(msg),
+                onTap: { handleTap(on: msg.id) },
+                audioURL: msg.audioURL,
+                duration: msg.audioDuration,
+                waveform: msg.waveform
+            )
+        } else {
+            MessageBubbleView(
+                text: msg.text,
+                isMe: msg.senderId == myId,
+                createdAt: msg.createdAt,
+                isExpanded: expandedMessageIDs.contains(msg.id),
+                status: statusForMessage(msg),
+                onTap: { handleTap(on: msg.id) }
+            )
         }
     }
 

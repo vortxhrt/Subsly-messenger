@@ -148,7 +148,7 @@ struct MessageBubbleView: View {
 }
 
 /// Spinner / ticks (shown only when expanded)
-private struct StatusIconView: View {
+struct StatusIconView: View {
     let state: DeliveryState
 
     var body: some View {
