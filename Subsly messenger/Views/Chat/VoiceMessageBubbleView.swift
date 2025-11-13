@@ -1,5 +1,6 @@
 import SwiftUI
 
+@MainActor
 struct VoiceMessageBubbleView: View {
     let messageId: String
     let isMe: Bool
