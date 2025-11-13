@@ -1,3 +1,4 @@
+import Foundation
 import SwiftUI
 import FirebaseFirestore
 
@@ -31,6 +32,7 @@ struct ThreadView: View {
 
     // Pending (sending) for local-outgoing messages
     @State private var pendingOutgoingIDs: Set<String> = []
+    @State private var loggedVoiceNoteIDs: Set<String> = []
 
     @State private var isOpening = false
     @State private var messageLimit: Int = 20
@@ -81,7 +83,7 @@ struct ThreadView: View {
                                 createdAt: msg.createdAt,
                                 isExpanded: expandedMessageIDs.contains(msg.id),
                                 status: statusForMessage(msg),
-                                onTap: { handleTap(on: msg.id) }
+                                onTap: { handleMessageTap(msg) }
                             )
                         }
 
@@ -126,6 +128,8 @@ struct ThreadView: View {
                     markIncomingAsRead()
                     // Clear pending IDs that no longer exist (server confirmed / replaced)
                     purgeStalePendingIDs()
+                    loggedVoiceNoteIDs = loggedVoiceNoteIDs.intersection(Set(messages.map { $0.id }))
+                    logVoiceNotesInSnapshot(context: "messages_change")
                 }
                 .onChange(of: isOtherTyping) { _ in
                     guard !isLoadingMore else { return }
@@ -180,6 +184,7 @@ struct ThreadView: View {
                 // Defensive first pass (in case messages already present)
                 markIncomingAsDelivered()
                 markIncomingAsRead()
+                logVoiceNotesInSnapshot(context: "onAppear")
                 #if DEBUG
                 print("ThreadView appear -> myId=\(myId) otherUID=\(otherUID) threadId=\(threadId ?? "nil")")
                 #endif
@@ -319,6 +324,15 @@ struct ThreadView: View {
         }
     }
 
+    private func handleMessageTap(_ message: MessageModel) {
+        var extras: [String: String] = [:]
+        if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
+        if deliveredByOther.contains(message.id) { extras["delivered"] = "true" }
+        if readByOther.contains(message.id) { extras["read"] = "true" }
+        logVoiceNote(event: "playback_tapped", message: message, extras: extras)
+        handleTap(on: message.id)
+    }
+
     // MARK: - Sending
 
     private func send() {
@@ -339,9 +353,30 @@ struct ThreadView: View {
         messages.append(local)
         inputText = ""
 
+        if voiceNoteMetadata(from: local.text) != nil {
+            logVoiceNote(event: "outgoing_local_prepared", message: local, extras: [
+                "threadId": tid,
+                "pending": "true"
+            ])
+            loggedVoiceNoteIDs.insert(localId)
+        }
+
         // Fire off the real send; when it completes, clear pending for that local id.
         Task {
-            try? await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
+            logVoiceNote(event: "send_requested", messageId: localId, senderId: myId, text: trimmed, extras: [
+                "threadId": tid
+            ])
+            do {
+                try await ChatService.shared.sendMessage(threadId: tid, from: myId, text: trimmed)
+                logVoiceNote(event: "send_succeeded", messageId: localId, senderId: myId, text: trimmed, extras: [
+                    "threadId": tid
+                ])
+            } catch {
+                logVoiceNote(event: "send_failed", messageId: localId, senderId: myId, text: trimmed, extras: [
+                    "threadId": tid,
+                    "error": error.localizedDescription
+                ])
+            }
             await MainActor.run {
                 pendingOutgoingIDs.remove(localId)
             }
@@ -392,6 +427,7 @@ struct ThreadView: View {
         listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
             Task { @MainActor in
                 self.messages = filteredMessages(list, threadId: threadId)
+                self.logVoiceNotesInSnapshot(context: "listener_update")
                 #if DEBUG
                 print("Messages updated (\(list.count)) for thread=\(threadId)")
                 #endif
@@ -524,4 +560,156 @@ private extension ThreadView {
             myId = sessionId
         }
     }
+
+    func logVoiceNotesInSnapshot(context: String) {
+        for message in messages {
+            guard voiceNoteMetadata(from: message.text) != nil else { continue }
+            guard !loggedVoiceNoteIDs.contains(message.id) else { continue }
+            var extras: [String: String] = ["context": context]
+            if pendingOutgoingIDs.contains(message.id) { extras["pending"] = "true" }
+            if deliveredByOther.contains(message.id) { extras["delivered"] = "true" }
+            if readByOther.contains(message.id) { extras["read"] = "true" }
+            logVoiceNote(event: "snapshot_seen", message: message, extras: extras)
+            loggedVoiceNoteIDs.insert(message.id)
+        }
+    }
+
+    func logVoiceNote(event: String, message: MessageModel, extras: [String: String] = [:]) {
+        var combined = extras
+        if let created = message.createdAt {
+            combined["createdAt"] = Self.logDateFormatter.string(from: created)
+        }
+        logVoiceNote(event: event,
+                     messageId: message.id,
+                     senderId: message.senderId,
+                     text: message.text,
+                     extras: combined)
+    }
+
+    func logVoiceNote(event: String, messageId: String, senderId: String, text: String, extras: [String: String] = [:]) {
+        guard let metadata = voiceNoteMetadata(from: text) else { return }
+
+        var fields = metadata.fields
+        for (key, value) in extras {
+            fields[key] = value
+        }
+
+        var components: [String] = ["[VoiceNote]", event]
+        components.append("messageId=\(messageId)")
+        components.append("senderId=\(senderId)")
+        let direction = senderId == myId ? "outgoing" : "incoming"
+        components.append("direction=\(direction)")
+
+        for (key, value) in fields.sorted(by: { $0.key < $1.key }) {
+            components.append("\(key)=\(value)")
+        }
+
+        components.append("payload=\(metadata.summary)")
+        print(components.joined(separator: " | "))
+    }
+
+    func voiceNoteMetadata(from text: String) -> VoiceNoteMetadata? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+
+        if let jsonMetadata = jsonVoiceNoteMetadata(from: trimmed) {
+            return jsonMetadata
+        }
+
+        let lowercased = trimmed.lowercased()
+        let keywordHit = ["voice_note", "voice-note", "voicenote", "voice note", "audio message"]
+            .contains(where: { lowercased.contains($0) })
+        if keywordHit {
+            return VoiceNoteMetadata(summary: truncated(trimmed), fields: [:])
+        }
+
+        let audioExtensions = [".m4a", ".aac", ".mp3", ".wav", ".caf", ".ogg"]
+        for ext in audioExtensions where lowercased.contains(ext) {
+            return VoiceNoteMetadata(summary: truncated(trimmed), fields: [:])
+        }
+
+        return nil
+    }
+
+    func jsonVoiceNoteMetadata(from text: String) -> VoiceNoteMetadata? {
+        guard let data = text.data(using: .utf8) else { return nil }
+        guard let object = try? JSONSerialization.jsonObject(with: data, options: []) else { return nil }
+        guard let rawDictionary = object as? [String: Any] else { return nil }
+
+        var lowered: [String: Any] = [:]
+        for (key, value) in rawDictionary {
+            let cleanedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            lowered[cleanedKey] = value
+        }
+
+        var summaryFields: [String: String] = [:]
+        var isVoiceCandidate = false
+
+        if let typeValue = lowered["type"] as? String {
+            summaryFields["type"] = typeValue
+            let loweredType = typeValue.lowercased()
+            if loweredType.contains("voice") || loweredType.contains("audio") {
+                isVoiceCandidate = true
+            }
+        }
+
+        let urlKeys = ["audiourl", "voiceurl", "voicenoteurl", "url", "remoteurl", "downloadurl", "mediaurl"]
+        for key in urlKeys {
+            if let value = lowered[key] as? String, !value.isEmpty {
+                summaryFields["url"] = value
+                if value.lowercased().contains("voice") { isVoiceCandidate = true }
+                break
+            }
+        }
+
+        let localKeys = ["localpath", "localurl", "localreference", "file", "filepath"]
+        for key in localKeys {
+            if let value = lowered[key] as? String, !value.isEmpty {
+                summaryFields["local"] = value
+                isVoiceCandidate = true
+                break
+            }
+        }
+
+        if let durationNumber = lowered["duration"] as? NSNumber {
+            summaryFields["duration"] = durationNumber.stringValue
+            isVoiceCandidate = true
+        } else if let durationString = lowered["duration"] as? String, !durationString.isEmpty {
+            summaryFields["duration"] = durationString
+            isVoiceCandidate = true
+        }
+
+        if let voiceFlag = lowered["isvoice"] as? Bool, voiceFlag { isVoiceCandidate = true }
+        if let voiceFlag = lowered["voicenote"] as? Bool, voiceFlag { isVoiceCandidate = true }
+        if let voiceFlag = lowered["isvoicenote"] as? Bool, voiceFlag { isVoiceCandidate = true }
+
+        guard isVoiceCandidate else { return nil }
+
+        let summaryText: String
+        if let compact = try? JSONSerialization.data(withJSONObject: rawDictionary, options: [.sortedKeys]),
+           let asString = String(data: compact, encoding: .utf8) {
+            summaryText = truncated(asString)
+        } else {
+            summaryText = truncated(text)
+        }
+
+        return VoiceNoteMetadata(summary: summaryText, fields: summaryFields)
+    }
+
+    func truncated(_ text: String, limit: Int = 400) -> String {
+        guard text.count > limit else { return text }
+        let endIndex = text.index(text.startIndex, offsetBy: limit)
+        return "\(text[..<endIndex])…(+\(text.count - limit) chars)"
+    }
+
+    private struct VoiceNoteMetadata {
+        let summary: String
+        var fields: [String: String]
+    }
+
+    static let logDateFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
 }
