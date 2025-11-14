@@ -7,7 +7,7 @@ enum DeliveryState {
     case pending   // sending (show spinner)
     case sent      // on server, not yet delivered
     case delivered // delivered to other device
-    case read      // read by other device
+    case read      // read by other devicebh
 }
 
 struct MessageBubbleView: View {
@@ -620,9 +620,7 @@ private final class AudioAttachmentPlayer: NSObject, ObservableObject, AVAudioPl
     private func play() {
         guard let player else { return }
         do {
-            let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .spokenAudio, options: [.defaultToSpeaker, .duckOthers])
-            try session.setActive(true, options: [])
+            try AppAudioSession.shared.activate(.playback)
             player.play()
             isPlaying = true
             startTimer()
@@ -639,7 +637,7 @@ private final class AudioAttachmentPlayer: NSObject, ObservableObject, AVAudioPl
         progress = duration > 0 ? player.currentTime / duration : 0
         isPlaying = false
         stopTimer()
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AppAudioSession.shared.deactivate()
     }
 
     private func stopPlayback(releaseSession: Bool) {
@@ -650,7 +648,7 @@ private final class AudioAttachmentPlayer: NSObject, ObservableObject, AVAudioPl
         isPlaying = false
         stopTimer()
         if releaseSession {
-            try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+            AppAudioSession.shared.deactivate()
         }
         if !isLoading {
             currentTime = 0
@@ -689,7 +687,7 @@ private final class AudioAttachmentPlayer: NSObject, ObservableObject, AVAudioPl
         stopTimer()
         currentTime = duration
         progress = duration > 0 ? 1 : 0
-        try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+        AppAudioSession.shared.deactivate()
     }
 }
 
