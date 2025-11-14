@@ -7,7 +7,7 @@ enum DeliveryState {
     case pending   // sending (show spinner)
     case sent      // on server, not yet delivered
     case delivered // delivered to other device
-    case read      // read by other devicebht THIS IS THE ONE WE WNT AGIN AND AGAIN
+    case read      // read by other devicebht THIS IS THE ONE WE WNT AGIN AND AGAIN AND AGAIN 123
 }
 
 struct MessageBubbleView: View {
