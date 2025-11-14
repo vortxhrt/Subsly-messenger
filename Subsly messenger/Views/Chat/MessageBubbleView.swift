@@ -30,9 +30,7 @@ struct MessageBubbleView: View {
                 if isMe {
                     Spacer(minLength: 0)
 
-                    Text(text)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
+                    bubbleContent
                         .foregroundStyle(.white)
                         .background(Color.accentColor)
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -40,9 +38,7 @@ struct MessageBubbleView: View {
                         .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
                         .padding(.trailing, edgeInset)   // small right gap
                 } else {
-                    Text(text)
-                        .padding(.vertical, 10)
-                        .padding(.horizontal, 14)
+                    bubbleContent
                         .foregroundStyle(.primary)
                         .background(Color(.secondarySystemFill))
                         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -82,6 +78,9 @@ struct MessageBubbleView: View {
 
     private var accessibilityLabel: String {
         var base = isMe ? "Your message" : "Message"
+        if voicePayload != nil {
+            base += ", voice note"
+        }
         if let createdAt {
             base += ", sent \(Self.fullAccessLabel.string(from: createdAt))"
         }
@@ -145,6 +144,25 @@ struct MessageBubbleView: View {
         f.timeStyle = .short
         return f
     }()
+}
+
+private extension MessageBubbleView {
+    @ViewBuilder
+    var bubbleContent: some View {
+        if let payload = voicePayload {
+            VoiceNoteBubbleView(payload: payload, isMe: isMe)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+        } else {
+            Text(text)
+                .padding(.vertical, 10)
+                .padding(.horizontal, 14)
+        }
+    }
+
+    var voicePayload: MessageModel.VoiceNotePayload? {
+        MessageModel.voiceNotePayload(from: text)
+    }
 }
 
 /// Spinner / ticks (shown only when expanded)
