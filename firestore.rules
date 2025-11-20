@@ -1,0 +1,120 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() { return request.auth != null; }
+
+    // Look up membership on the parent thread doc
+    function isThreadMember(threadId) {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/threads/$(threadId))
+        && get(/databases/$(database)/documents/threads/$(threadId)).data.members is list
+        && get(/databases/$(database)/documents/threads/$(threadId)).data.members.hasAny([request.auth.uid]);
+    }
+
+    // ---------- users ----------
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if request.auth.uid == userId;
+
+      match /deviceTokens/{tokenId} {
+        allow read, create, update, delete: if request.auth.uid == userId;
+      }
+    }
+
+    // ---------- threads ----------
+    match /threads/{threadId} {
+
+      // Require membership for any list/get operations; blocks broad scans.
+      allow list, get: if isThreadMember(threadId);
+
+      // Creating a thread requires the creator to be in members.
+      allow create: if isSignedIn()
+        && request.resource.data.members is list
+        && request.resource.data.members.hasAny([request.auth.uid]);
+
+      // Members can update, but cannot change the members set.
+      allow update: if isThreadMember(threadId)
+        && (
+          // If 'members' is not being touched, OK.
+          !request.resource.data.keys().hasAny(['members'])
+          // Or, if it is present, it must be identical.
+          || (
+            request.resource.data.members is list
+            && resource.data.members is list
+            && request.resource.data.members.hasOnly(resource.data.members)
+            && resource.data.members.hasOnly(request.resource.data.members)
+          )
+        );
+
+      allow delete: if false;
+
+      // ----- messages -----
+      match /messages/{messageId} {
+
+        // Anyone in the thread may read messages.
+        allow list, get: if isThreadMember(threadId);
+
+        // Send message: must be a member and the senderId must match.
+        allow create: if isThreadMember(threadId)
+          && request.resource.data.senderId == request.auth.uid;
+
+        // Updates (deliver/read flags, soft edits): member-only.
+        // We also make sure deliveredTo/readBy can only grow and, if present,
+        // include the caller (works with arrayUnion transforms).
+        allow update: if isThreadMember(threadId)
+          && (
+            // Only allow these fields to change (plus common timestamps/status).
+            request.resource.data.diff(resource.data).changedKeys()
+              .hasOnly(['deliveredTo','readBy','editedAt','deletedAt','updatedAt','status','lastActivityAt'])
+          )
+          && (
+            // deliveredTo can be omitted or must remain a superset
+            !request.resource.data.keys().hasAny(['deliveredTo'])
+            || (
+              request.resource.data.deliveredTo is list
+              && (resource.data.deliveredTo is list
+                    ? request.resource.data.deliveredTo.hasAll(resource.data.deliveredTo)
+                    : true)
+              && request.resource.data.deliveredTo.hasAny([request.auth.uid])
+            )
+          )
+          && (
+            // readBy can be omitted or must remain a superset
+            !request.resource.data.keys().hasAny(['readBy'])
+            || (
+              request.resource.data.readBy is list
+              && (resource.data.readBy is list
+                    ? request.resource.data.readBy.hasAll(resource.data.readBy)
+                    : true)
+              && request.resource.data.readBy.hasAny([request.auth.uid])
+            )
+          );
+
+        allow delete: if false;
+      }
+
+      // ----- typing -----
+      match /typing/{userId} {
+        allow read: if isThreadMember(threadId);
+        allow create, update: if isThreadMember(threadId)
+          && request.auth.uid == userId;
+        allow delete: if false;
+      }
+
+      // ----- receipts -----
+      match /receipts/{messageId} {
+        allow read, write: if isThreadMember(threadId);
+        allow delete: if false;
+      }
+
+      // ----- presence -----
+      match /presence/{userId} {
+        allow read: if isThreadMember(threadId);
+        allow create, update: if isThreadMember(threadId)
+          && request.auth.uid == userId;
+        allow delete: if false;
+      }
+    }
+  }
+}

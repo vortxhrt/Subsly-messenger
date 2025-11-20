@@ -1,0 +1,76 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function threadDoc(threadId) {
+      return firestore.get(/databases/(default)/documents/threads/$(threadId));
+    }
+
+    function threadMembers(threadId) {
+      let doc = threadDoc(threadId);
+      return doc != null
+             && doc.data != null
+             && doc.data.keys().hasAny(['members'])
+             && doc.data.members is list
+        ? doc.data.members
+        : [];
+    }
+
+    function isThreadMember(threadId) {
+      return request.auth != null
+          && request.auth.uid in threadMembers(threadId);
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    // ---------- Avatars ----------
+    match /avatars/{fileId} {
+      allow read: if isSignedIn();
+
+      // e.g. "<uid>.jpg" or "<uid>.jpeg"
+      allow write: if isSignedIn()
+                   && fileId.matches('^' + request.auth.uid + '\\.(jpg|jpeg)$')
+                   && request.resource.contentType in ['image/jpeg']
+                   && request.resource.size < 6 * 1024 * 1024;
+
+      allow delete: if false;
+    }
+
+    // ---------- Thread attachments ----------
+    match /threads/{threadId}/attachments/{fileName} {
+      allow read: if isThreadMember(threadId);
+
+      allow create, update: if isThreadMember(threadId)
+        && (
+          // MP4 video
+          (
+            fileName.matches('^[A-Za-z0-9_-]+\\.mp4$')
+            && request.resource.contentType == 'video/mp4'
+            && request.resource.size < 40 * 1024 * 1024
+          )
+          ||
+          // JPEG image (original or *_thumb)
+          (
+            fileName.matches('^[A-Za-z0-9_-]+(?:_thumb)?\\.jpg$')
+            && request.resource.contentType == 'image/jpeg'
+            && request.resource.size < 6 * 1024 * 1024
+          )
+          ||
+          // M4A audio (AAC in MP4 container)
+          (
+            fileName.matches('^[A-Za-z0-9_-]+\\.m4a$')
+            && request.resource.contentType in ['audio/m4a', 'audio/mp4']
+            && request.resource.size < 12 * 1024 * 1024
+          )
+        );
+
+      allow delete: if false;
+    }
+
+    // Deny-by-default for any other paths.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
