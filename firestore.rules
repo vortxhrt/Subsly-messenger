@@ -25,8 +25,12 @@ service cloud.firestore {
     // ---------- threads ----------
     match /threads/{threadId} {
 
-      // Require membership for any list/get operations; blocks broad scans.
-      allow list, get: if isThreadMember(threadId);
+      // Queries: allow signed-in users to run queries; document reads below
+      // still require membership, so broad scans remain blocked.
+      allow list: if isSignedIn();
+
+      // Document access: caller must be a member.
+      allow get: if isThreadMember(threadId);
 
       // Creating a thread requires the creator to be in members.
       allow create: if isSignedIn()
