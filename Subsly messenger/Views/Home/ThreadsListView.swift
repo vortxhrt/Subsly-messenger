@@ -88,13 +88,17 @@ private struct ThreadRow: View {
     @State private var showingDeleteConfirmation = false
 
     private var otherUser: AppUser? { usersStore.user(for: otherId) }
+    
+    // Helper to check if data is ready
+    private var isProfileLoaded: Bool { otherUser != nil }
 
     private var otherName: String {
         if let user = otherUser {
             let preferred = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             return preferred.isEmpty ? "@\(user.handle)" : preferred
         }
-        return "User \(otherId.prefix(6))"
+        // Returns a placeholder length so the skeleton bar looks like a name
+        return "Loading Name..."
     }
 
     private var avatarLabel: String {
@@ -102,7 +106,7 @@ private struct ThreadRow: View {
             let preferred = user.displayName.trimmingCharacters(in: .whitespacesAndNewlines)
             return preferred.isEmpty ? user.handle : preferred
         }
-        return "User \(otherId.prefix(6))"
+        return "?"
     }
 
     private var otherStatus: AvatarView.OnlineStatus? {
@@ -115,16 +119,21 @@ private struct ThreadRow: View {
             ThreadView(currentUser: currentUser, otherUID: otherId)
         } label: {
             HStack(spacing: 12) {
+                // Avatar with skeleton loading
                 AvatarView(avatarURL: otherUser?.avatarURL,
                            name: avatarLabel,
                            size: 40,
                            status: otherStatus)
+                .redacted(reason: isProfileLoaded ? [] : .placeholder)
 
                 VStack(alignment: .leading, spacing: 2) {
+                    // Name with skeleton loading
                     Text(otherName)
                         .fontWeight(.semibold)
+                        .redacted(reason: isProfileLoaded ? [] : .placeholder)
 
-                    // Live preview: typing or last message text
+                    // Live preview (typing or message) is NOT redacted because
+                    // it comes from the thread document which is already loaded.
                     ThreadPreviewText(
                         thread: thread,
                         otherUserId: otherId,
