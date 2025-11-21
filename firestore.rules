@@ -1,37 +1,120 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isSignedIn() {
-      return request.auth != null;
-    }
 
+    function isSignedIn() { return request.auth != null; }
+
+    // Look up membership on the parent thread doc
     function isThreadMember(threadId) {
-      return isSignedIn() &&
-        request.auth.uid in get(/databases/$(database)/documents/threads/$(threadId)).data.members;
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/threads/$(threadId))
+        && get(/databases/$(database)/documents/threads/$(threadId)).data.members is list
+        && get(/databases/$(database)/documents/threads/$(threadId)).data.members.hasAny([request.auth.uid]);
     }
 
+    // ---------- users ----------
+    match /users/{userId} {
+      allow read: if isSignedIn();
+      allow create, update, delete: if request.auth.uid == userId;
+
+      match /deviceTokens/{tokenId} {
+        allow read, create, update, delete: if request.auth.uid == userId;
+      }
+    }
+
+    // ---------- threads ----------
     match /threads/{threadId} {
-      // Only thread members can read thread metadata.
-      allow read: if isThreadMember(threadId);
-      // Allow create when the authenticated user is one of the provided members.
-      allow create: if isSignedIn() && request.auth.uid in request.resource.data.members;
-      // Let members update thread-level metadata like last message preview.
-      allow update: if isThreadMember(threadId);
 
-      // Message documents under a thread.
+      // Queries: allow signed-in users to run queries; document reads below
+      // still require membership, so broad scans remain blocked.
+      allow list: if isSignedIn();
+
+      // Document access: caller must be a member.
+      allow get: if isThreadMember(threadId);
+
+      // Creating a thread requires the creator to be in members.
+      allow create: if isSignedIn()
+        && request.resource.data.members is list
+        && request.resource.data.members.hasAny([request.auth.uid]);
+
+      // Members can update, but cannot change the members set.
+      allow update: if isThreadMember(threadId)
+        && (
+          // If 'members' is not being touched, OK.
+          !request.resource.data.keys().hasAny(['members'])
+          // Or, if it is present, it must be identical.
+          || (
+            request.resource.data.members is list
+            && resource.data.members is list
+            && request.resource.data.members.hasOnly(resource.data.members)
+            && resource.data.members.hasOnly(request.resource.data.members)
+          )
+        );
+
+      allow delete: if false;
+
+      // ----- messages -----
       match /messages/{messageId} {
-        // All message reads are limited to thread members.
-        allow read: if isThreadMember(threadId);
 
-        // Sender can create messages when they belong to the thread.
-        allow create: if isThreadMember(threadId) && request.resource.data.senderId == request.auth.uid;
+        // Anyone in the thread may read messages.
+        allow list, get: if isThreadMember(threadId);
 
-        // Allow members to add delivery/read receipts but prevent them from modifying other fields.
-        // This should let a recipient update delivered/read arrays without touching message content,
-        // avoiding the "Missing or insufficient permissions" error on device.
+        // Send message: must be a member and the senderId must match.
+        allow create: if isThreadMember(threadId)
+          && request.resource.data.senderId == request.auth.uid;
+
+        // Updates (deliver/read flags, soft edits): member-only.
+        // deliveredTo/readBy can only grow (works with arrayUnion transforms).
         allow update: if isThreadMember(threadId)
-          && request.resource.data.diff(resource.data).changedKeys().hasOnly(['deliveredTo', 'readBy'])
-          && request.resource.data.keys().hasOnly(resource.data.keys().union(['deliveredTo', 'readBy']));
+          && (
+            // Only allow these fields to change (plus common timestamps/status).
+            request.resource.data.diff(resource.data).changedKeys()
+              .hasOnly(['deliveredTo','readBy','editedAt','deletedAt','updatedAt','status','lastActivityAt'])
+          )
+          && (
+            // deliveredTo can be omitted or must remain a superset
+            !request.resource.data.keys().hasAny(['deliveredTo'])
+            || (
+              request.resource.data.deliveredTo is list
+              && (resource.data.deliveredTo is list
+                    ? request.resource.data.deliveredTo.hasAll(resource.data.deliveredTo)
+                    : true)
+            )
+          )
+          && (
+            // readBy can be omitted or must remain a superset
+            !request.resource.data.keys().hasAny(['readBy'])
+            || (
+              request.resource.data.readBy is list
+              && (resource.data.readBy is list
+                    ? request.resource.data.readBy.hasAll(resource.data.readBy)
+                    : true)
+            )
+          );
+
+        allow delete: if false;
+      }
+
+      // ----- typing -----
+      match /typing/{userId} {
+        allow read: if isThreadMember(threadId);
+        allow create, update: if isThreadMember(threadId)
+          && request.auth.uid == userId;
+        allow delete: if false;
+      }
+
+      // ----- receipts -----
+      match /receipts/{messageId} {
+        allow read, write: if isThreadMember(threadId);
+        allow delete: if false;
+      }
+
+      // ----- presence -----
+      match /presence/{userId} {
+        allow read: if isThreadMember(threadId);
+        allow create, update: if isThreadMember(threadId)
+          && request.auth.uid == userId;
+        allow delete: if false;
       }
     }
   }
