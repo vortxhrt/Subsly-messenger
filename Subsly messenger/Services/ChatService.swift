@@ -295,24 +295,6 @@ actor ChatService {
                               .order(by: "updatedAt", descending: true)
         ChatService.dbg("Query: threads WHERE members ARRAY_CONTAINS \(uid) ORDER BY updatedAt DESC")
 
-        // PROBE 0: correct query, one-shot
-        query.limit(to: 1).getDocuments { snap, err in
-            if let err = err {
-                ChatService.dbg("PROBE0 one-shot failed"); ChatService.dumpNSError(err)
-            } else {
-                ChatService.dbg("PROBE0 one-shot OK, count=\(snap?.documents.count ?? 0)")
-            }
-        }
-
-        // PROBE 1: missing membership filter (should fail with secure rules)
-        threadsCol.order(by: "updatedAt", descending: true).limit(to: 1).getDocuments { _, err in
-            if let err = err {
-                ChatService.dbg("PROBE1 no-members-filter expected fail:"); ChatService.dumpNSError(err)
-            } else {
-                ChatService.dbg("PROBE1 unexpectedly succeeded (rules allow list broadly)")
-            }
-        }
-
         // Live listener
         return query.addSnapshotListener { snap, err in
             if let err = err {
