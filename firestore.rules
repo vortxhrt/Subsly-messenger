@@ -27,6 +27,8 @@ service cloud.firestore {
         allow create: if isThreadMember(threadId) && request.resource.data.senderId == request.auth.uid;
 
         // Allow members to add delivery/read receipts but prevent them from modifying other fields.
+        // This should let a recipient update delivered/read arrays without touching message content,
+        // avoiding the "Missing or insufficient permissions" error on device.
         allow update: if isThreadMember(threadId)
           && request.resource.data.diff(resource.data).changedKeys().hasOnly(['deliveredTo', 'readBy'])
           && request.resource.data.keys().hasOnly(resource.data.keys().union(['deliveredTo', 'readBy']));
