@@ -62,8 +62,20 @@ final class SessionStore: ObservableObject {
                     return
                 }
             }
+            
+            // Ensure E2EE keys exist locally
+            try? CryptoService.shared.ensureKeysExist()
+            
             // Fetch the user from Firestore
-            currentUser = try await UserService.shared.fetchUser(uid: uid)
+            var fetchedUser = try await UserService.shared.fetchUser(uid: uid)
+            
+            // Backfill Public Key if missing on server (Migration for existing users)
+            if let user = fetchedUser, user.publicKey == nil, let myKey = CryptoService.shared.getMyPublicKey() {
+                try? await UserService.shared.updateUserPublicKey(uid: uid, key: myKey)
+                fetchedUser?.publicKey = myKey
+            }
+            
+            currentUser = fetchedUser
             // Save any pending FCM token once user is loaded
             PushNotificationManager.shared.savePendingToken(for: uid)
         } catch {

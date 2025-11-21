@@ -11,6 +11,7 @@ struct AppUser: Identifiable, Equatable, Codable {
     var isOnline: Bool
     var shareOnlineStatus: Bool
     var lastOnlineAt: Date?
+    var publicKey: String? // Added for E2EE
 
     init(id: String? = nil,
          handle: String,
@@ -20,7 +21,8 @@ struct AppUser: Identifiable, Equatable, Codable {
          createdAt: Date? = nil,
          isOnline: Bool = false,
          shareOnlineStatus: Bool = true,
-         lastOnlineAt: Date? = nil) {
+         lastOnlineAt: Date? = nil,
+         publicKey: String? = nil) {
         self.id = id
         self.handle = handle
         self.handleLower = handle.lowercased()
@@ -31,5 +33,6 @@ struct AppUser: Identifiable, Equatable, Codable {
         self.isOnline = isOnline
         self.shareOnlineStatus = shareOnlineStatus
         self.lastOnlineAt = lastOnlineAt
+        self.publicKey = publicKey
     }
 }

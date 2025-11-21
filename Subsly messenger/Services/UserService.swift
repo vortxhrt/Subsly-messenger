@@ -13,6 +13,11 @@ actor UserService {
                            displayName: String,
                            avatarURL: String? = nil,
                            bio: String? = nil) async throws {
+        
+        // Ensure keys exist and get public key
+        try? CryptoService.shared.ensureKeysExist()
+        let publicKey = CryptoService.shared.getMyPublicKey()
+        
         let sanitizedDisplayName = ProfileSanitizer.sanitizeDisplayName(displayName, fallback: handle)
         let sanitizedBio = ProfileSanitizer.sanitizeBio(bio)
         var payload: [String: Any] = [
@@ -29,6 +34,10 @@ actor UserService {
         if let sanitizedBio {
             payload["bio"] = sanitizedBio
         }
+        if let publicKey {
+            payload["publicKey"] = publicKey
+        }
+        
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
 
@@ -43,6 +52,14 @@ actor UserService {
         }
         try await db.collection("users").document(uid).setData(payload, merge: true)
     }
+    
+    // Helper to backfill keys for existing users
+    func updateUserPublicKey(uid: String, key: String) async throws {
+        try await db.collection("users").document(uid).setData([
+            "publicKey": key,
+            "updatedAt": FieldValue.serverTimestamp()
+        ], merge: true)
+    }
 
     // Build AppUser on main actor (avoids MainActor initializer warnings)
     private func mapUser(id: String, data: [String: Any]) async -> AppUser {
@@ -55,6 +72,8 @@ actor UserService {
         let isOnline = data["isOnline"] as? Bool ?? false
         let shareOnlineStatus = data["shareOnlineStatus"] as? Bool ?? true
         let lastOnlineAt = (data["lastOnlineAt"] as? Timestamp)?.dateValue()
+        let publicKey = data["publicKey"] as? String
+        
         return await MainActor.run {
             AppUser(id: id,
                     handle: handle,
@@ -64,7 +83,8 @@ actor UserService {
                     createdAt: createdAt,
                     isOnline: isOnline,
                     shareOnlineStatus: shareOnlineStatus,
-                    lastOnlineAt: lastOnlineAt)
+                    lastOnlineAt: lastOnlineAt,
+                    publicKey: publicKey)
         }
     }
 

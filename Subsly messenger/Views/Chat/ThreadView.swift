@@ -8,20 +8,19 @@ import UIKit
 import Combine
 
 struct ThreadView: View {
+    // We now use ChatStore for messages to get automatic decryption
+    @StateObject private var chatStore = ChatStore()
     @EnvironmentObject private var threadsStore: ThreadsStore
     @EnvironmentObject private var usersStore: UsersStore
+    
     let currentUser: AppUser
     let otherUID: String
 
     private let myId: String
 
     @State private var threadId: String?
-    @State private var messages: [MessageModel] = []
-    @State private var serverMessages: [MessageModel] = []
-    @State private var pendingLocalMessages: [MessageModel] = []
     @State private var inputText: String = ""
 
-    @State private var listener: ListenerRegistration?
     @State private var typingListener: ListenerRegistration?
     @State private var isOtherTyping: Bool = false
 
@@ -37,15 +36,15 @@ struct ThreadView: View {
 
     // Pending (sending) for local-outgoing messages
     @State private var pendingOutgoingIDs: Set<String> = []
+    // Pending local messages (before they hit server/store)
+    @State private var pendingLocalMessages: [MessageModel] = []
 
     @State private var isOpening = false
-    @State private var messageLimit: Int = 20
-    private let pageSize: Int = 20
+    
+    // Constants
     private let attachmentLimit: Int = 20
-    private let prefetchMediaLimit: Int = 20
-    @State private var hasMoreHistory: Bool = false
-    @State private var isLoadingMore: Bool = false
-    @State private var restoreScrollToId: String?
+    
+    // View State
     @State private var hasPerformedInitialScroll = false
     @State private var showingProfile = false
 
@@ -74,29 +73,37 @@ struct ThreadView: View {
         let hasAttachment = !pendingAttachments.isEmpty
         return (!trimmed.isEmpty || hasAttachment) && !isProcessingAttachment
     }
+    
+    // Merge Server Messages (Decrypted from Store) + Local Pending Messages
+    private var displayMessages: [MessageModel] {
+        var combined = chatStore.messages
+        
+        if !pendingLocalMessages.isEmpty {
+            // Filter out pending messages that have been confirmed by server
+            // (Server message usually has clientMessageId matching local id)
+            let serverClientIds = Set(combined.compactMap { $0.clientMessageId })
+            let filteredPending = pendingLocalMessages.filter { !serverClientIds.contains($0.id) }
+            
+            let sortedPending = filteredPending.sorted { (lhs, rhs) -> Bool in
+                let lhsDate = lhs.createdAt ?? Date()
+                let rhsDate = rhs.createdAt ?? Date()
+                return lhsDate < rhsDate
+            }
+            combined.append(contentsOf: sortedPending)
+        }
+        
+        return combined
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
             VStack(spacing: 0) {
                 ScrollView {
                     LazyVStack(spacing: 6) {
-                        if hasMoreHistory {
-                            Color.clear
-                                .frame(height: 1)
-                                .onAppear {
-                                    if hasPerformedInitialScroll && !isLoadingMore {
-                                        loadMoreHistory()
-                                    }
-                                }
-                        }
+                        // Padding for top
+                        Color.clear.frame(height: 1)
 
-                        if hasMoreHistory && isLoadingMore {
-                            ProgressView()
-                                .scaleEffect(0.85)
-                                .padding(.bottom, 6)
-                        }
-
-                        ForEach(messages, id: \.id) { msg in
+                        ForEach(displayMessages, id: \.id) { msg in
                             let isMe = msg.senderId == myId
                             let metadata = senderMetadata(for: msg)
 
@@ -140,12 +147,17 @@ struct ThreadView: View {
                 .scrollIndicators(.hidden)
                 .background(Color(.systemGroupedBackground))
 
-                // Keep bottom pinned and wire receipts whenever messages change.
-                .onChange(of: messages) { newMessages in
-                    handleMessagesChange(newMessages, proxy: proxy)
+                // Scroll logic
+                .onChange(of: chatStore.messages) { _ in
+                    handleMessagesChange(proxy: proxy)
+                }
+                .onChange(of: pendingLocalMessages.count) { _ in
+                     // Scroll to bottom when sending new message locally
+                     if !pendingLocalMessages.isEmpty {
+                         scheduleBottomScroll(proxy: proxy, animated: true)
+                     }
                 }
                 .onChange(of: isOtherTyping) { _ in
-                    guard !isLoadingMore else { return }
                     scheduleBottomScroll(proxy: proxy, animated: true)
                 }
                 .onChange(of: composerHeight) { _ in
@@ -224,12 +236,9 @@ struct ThreadView: View {
                 setupReceiptsIfNeeded()
                 markIncomingAsDelivered()
                 markIncomingAsRead()
-                #if DEBUG
-                print("ThreadView appear -> myId=\(myId) otherUID=\(otherUID) threadId=\(threadId ?? "nil")")
-                #endif
             }
             .onDisappear {
-                listener?.remove(); listener = nil
+                chatStore.stop()
                 typingListener?.remove(); typingListener = nil
                 cleanupReceiptListeners()
                 for attachment in pendingAttachments {
@@ -240,7 +249,7 @@ struct ThreadView: View {
                 pendingAttachments.removeAll()
                 pendingLocalMessages.removeAll()
                 pendingOutgoingIDs.removeAll()
-                rebuildMessages()
+                
                 attachmentTask?.cancel(); attachmentTask = nil
                 if let tid = threadId, !myId.isEmpty {
                     Task { try? await TypingService.shared.setTyping(threadId: tid, userId: myId, isTyping: false) }
@@ -297,7 +306,8 @@ struct ThreadView: View {
         guard let tid = threadId else { return }
 
         var activeMessageIDs: Set<String> = []
-        for msg in messages where msg.senderId == myId {
+        // Use displayMessages to include both server and local (though local won't have receipts yet)
+        for msg in displayMessages where msg.senderId == myId {
             if msg.id.hasPrefix("local-") { continue }
             activeMessageIDs.insert(msg.id)
 
@@ -355,7 +365,8 @@ struct ThreadView: View {
         guard let tid = threadId else { return }
         let otherId = otherUID
         let myIdCopy = myId
-        let messageIds = messages
+        // Filter from server messages only
+        let messageIds = chatStore.messages
             .filter { $0.senderId == otherId }
             .map { $0.id }
         guard !messageIds.isEmpty else { return }
@@ -363,9 +374,6 @@ struct ThreadView: View {
         let threadIdCopy = tid
         Task.detached(priority: .utility) {
             for messageId in messageIds {
-                #if DEBUG
-                print("MARK DELIVERED tid=\(threadIdCopy) msg=\(messageId) to=\(myIdCopy)")
-                #endif
                 await ReceiptsService.shared.markDelivered(threadId: threadIdCopy,
                                                             messageId: messageId,
                                                             to: myIdCopy)
@@ -377,7 +385,8 @@ struct ThreadView: View {
         guard let tid = threadId else { return }
         let otherId = otherUID
         let myIdCopy = myId
-        let messageIds = messages
+        // Filter from server messages only
+        let messageIds = chatStore.messages
             .filter { $0.senderId == otherId }
             .map { $0.id }
         guard !messageIds.isEmpty else { return }
@@ -385,9 +394,6 @@ struct ThreadView: View {
         let threadIdCopy = tid
         Task.detached(priority: .utility) {
             for messageId in messageIds {
-                #if DEBUG
-                print("MARK READ tid=\(threadIdCopy) msg=\(messageId) by=\(myIdCopy)")
-                #endif
                 await ReceiptsService.shared.markRead(threadId: threadIdCopy,
                                                        messageId: messageId,
                                                        by: myIdCopy)
@@ -445,7 +451,8 @@ struct ThreadView: View {
         )
         pendingOutgoingIDs.insert(localId)
         pendingLocalMessages.append(localMessage)
-        rebuildMessages()
+        // UI update happens automatically via displayMessages
+        
         inputText = ""
         let attachmentsCopy = pendingAttachments
         pendingAttachments.removeAll()
@@ -478,7 +485,6 @@ struct ThreadView: View {
                 await MainActor.run {
                     self.pendingOutgoingIDs.remove(localId)
                     self.pendingLocalMessages.removeAll { $0.id == localId }
-                    self.rebuildMessages()
                 }
             }
         }
@@ -488,66 +494,10 @@ struct ThreadView: View {
         }
     }
 
-    /// Remove pending IDs that no longer exist in the list (server confirmation replaced local message).
-    private func purgeStalePendingIDs() {
-        let present = Set(messages.map { $0.id })
-        pendingOutgoingIDs = pendingOutgoingIDs.intersection(present)
-    }
+    // MARK: - Updates
 
-    private func rebuildMessages() {
-        var combined = serverMessages
-        if !pendingLocalMessages.isEmpty {
-            let sortedPending = pendingLocalMessages.sorted { (lhs, rhs) -> Bool in
-                let lhsDate = lhs.createdAt ?? Date()
-                let rhsDate = rhs.createdAt ?? Date()
-                if abs(lhsDate.timeIntervalSince(rhsDate)) < 0.000_1 {
-                    return lhs.id < rhs.id
-                }
-                return lhsDate < rhsDate
-            }
-            combined.append(contentsOf: sortedPending)
-        }
-        messages = combined
-    }
-
-    private func removeSatisfiedPending(using server: [MessageModel]) {
-        guard !pendingLocalMessages.isEmpty else { return }
-        let satisfied = Set(server.compactMap { $0.clientMessageId })
-        guard !satisfied.isEmpty else { return }
-
-        var remaining: [MessageModel] = []
-        var removedIds: Set<String> = []
-
-        for local in pendingLocalMessages {
-            if let clientId = local.clientMessageId, satisfied.contains(clientId) {
-                removedIds.insert(local.id)
-            } else {
-                remaining.append(local)
-            }
-        }
-
-        if !removedIds.isEmpty {
-            pendingLocalMessages = remaining
-            pendingOutgoingIDs.subtract(removedIds)
-            removedIds.forEach { id in
-                expandedMessageIDs.remove(id)
-                expandTokens[id] = nil
-            }
-        }
-    }
-
-    private func handleMessagesChange(_ newMessages: [MessageModel], proxy: ScrollViewProxy) {
-        hasMoreHistory = serverMessages.count >= messageLimit
-
-        if isLoadingMore {
-            if let restoreId = restoreScrollToId {
-                DispatchQueue.main.async {
-                    proxy.scrollTo(restoreId, anchor: .top)
-                }
-            }
-            restoreScrollToId = nil
-            isLoadingMore = false
-        } else if !newMessages.isEmpty {
+    private func handleMessagesChange(proxy: ScrollViewProxy) {
+        if !chatStore.messages.isEmpty {
             if hasPerformedInitialScroll {
                 scheduleBottomScroll(proxy: proxy, animated: true)
             } else {
@@ -557,39 +507,20 @@ struct ThreadView: View {
                 hasPerformedInitialScroll = true
             }
         }
+        
+        // Cleanup pending messages that have arrived from server
+        let serverClientIds = Set(chatStore.messages.compactMap { $0.clientMessageId })
+        pendingLocalMessages.removeAll { msg in
+            if let cid = msg.clientMessageId, serverClientIds.contains(cid) {
+                pendingOutgoingIDs.remove(msg.id)
+                return true
+            }
+            return false
+        }
 
         setupReceiptsIfNeeded()
         markIncomingAsDelivered()
         markIncomingAsRead()
-        purgeStalePendingIDs()
-    }
-
-    private func prefetchMediaForLatestMessages() {
-        guard !serverMessages.isEmpty else { return }
-        let latest = serverMessages.suffix(prefetchMediaLimit)
-        Task.detached(priority: .utility) {
-            for message in latest {
-                for media in message.media {
-                    if media.localData != nil || media.localThumbnailData != nil {
-                        continue
-                    }
-                    switch media.kind {
-                    case .image:
-                        if let urlString = media.url, let url = URL(string: urlString) {
-                            await MediaCache.shared.prefetch(url: url)
-                        }
-                    case .video:
-                        if let thumbString = media.thumbnailURL, let url = URL(string: thumbString) {
-                            await MediaCache.shared.prefetch(url: url)
-                        }
-                    case .audio:
-                        if let urlString = media.url, let url = URL(string: urlString) {
-                            await MediaCache.shared.prefetch(url: url)
-                        }
-                    }
-                }
-            }
-        }
     }
 
     private func removePendingAttachment(_ attachment: PendingAttachment) {
@@ -602,6 +533,7 @@ struct ThreadView: View {
     // MARK: - Reply handling
 
     private func startReply(with message: MessageModel) {
+        // Note: When replying, we use the decrypted text from the model if available
         let trimmed = message.text.trimmingCharacters(in: .whitespacesAndNewlines)
         let previewText = trimmed.isEmpty ? nil : trimmed
         let name = resolvedDisplayName(for: message.senderId)
@@ -804,50 +736,13 @@ struct ThreadView: View {
            let tid = t.id, !tid.isEmpty {
             await MainActor.run {
                 self.threadId = tid
-                messageLimit = pageSize
-                hasMoreHistory = false
-                isLoadingMore = false
-                restoreScrollToId = nil
                 hasPerformedInitialScroll = false
-                startListening(threadId: tid, limit: messageLimit)
+                // E2EE: Start ChatStore instead of raw listener
+                chatStore.start(threadId: tid, otherUserId: otherUID)
+                
                 startTypingListener(threadId: tid)
-                #if DEBUG
-                print("Opened threadId=\(tid) as myId=\(myId) with otherUID=\(otherUID)")
-                #endif
             }
         }
-    }
-
-    private func startListening(threadId: String, limit: Int) {
-        listener?.remove()
-        listener = ChatService.shared.listenMessages(threadId: threadId, limit: limit) { list in
-            Task { @MainActor in
-                let filtered = self.filteredMessages(list, threadId: threadId)
-                self.serverMessages = filtered
-                self.removeSatisfiedPending(using: filtered)
-                self.rebuildMessages()
-                self.prefetchMediaForLatestMessages()
-                #if DEBUG
-                print("Messages updated (\(list.count)) for thread=\(threadId)")
-                #endif
-            }
-        }
-    }
-
-    private func filteredMessages(_ list: [MessageModel], threadId: String) -> [MessageModel] {
-        guard let cutoff = threadsStore.deletionCutoff(for: threadId) else { return list }
-        return list.filter { message in
-            guard let created = message.createdAt else { return false }
-            return created > cutoff
-        }
-    }
-
-    private func loadMoreHistory() {
-        guard hasMoreHistory, !isLoadingMore, let tid = threadId else { return }
-        restoreScrollToId = messages.first?.id
-        isLoadingMore = true
-        messageLimit += pageSize
-        startListening(threadId: tid, limit: messageLimit)
     }
 
     private func startTypingListener(threadId: String) {
@@ -863,7 +758,7 @@ struct ThreadView: View {
     }
 
     private func scrollToBottom(proxy: ScrollViewProxy, animated: Bool) {
-        let targetId = messages.last?.id ?? "BOTTOM_ANCHOR"
+        let targetId = displayMessages.last?.id ?? "BOTTOM_ANCHOR"
         if animated {
             withAnimation(.easeOut(duration: 0.25)) {
                 proxy.scrollTo(targetId, anchor: .bottom)
@@ -886,7 +781,7 @@ struct ThreadView: View {
     }
 
     private func scrollToMessage(withId id: String, proxy: ScrollViewProxy) {
-        guard messages.contains(where: { $0.id == id }) else { return }
+        guard chatStore.messages.contains(where: { $0.id == id }) else { return }
         withAnimation(.easeInOut(duration: 0.3)) {
             proxy.scrollTo(id, anchor: .center)
         }
