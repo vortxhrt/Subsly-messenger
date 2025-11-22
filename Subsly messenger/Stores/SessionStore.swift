@@ -7,32 +7,25 @@ import FirebaseAuth
 final class SessionStore: ObservableObject {
     static let shared = SessionStore()
 
-    // Indicates whether the session is currently loading
     @Published var isLoading: Bool = true
-    // Holds the current user object (nil while signed out)
     @Published var currentUser: AppUser?
-    // Email requiring verification before proceeding
     @Published var pendingEmailVerification: String?
-    // Tracks last time we dispatched a verification email
     @Published private(set) var lastVerificationEmailSentAt: Date?
 
     private var authHandle: AuthStateDidChangeListenerHandle?
 
     private init() {
-        // Observe Firebase Auth state changes
         authHandle = Auth.auth().addStateDidChangeListener { [weak self] _, user in
             Task { await self?.reload(for: user?.uid) }
         }
     }
 
     deinit {
-        // Clean up the auth state listener
         if let h = authHandle {
             Auth.auth().removeStateDidChangeListener(h)
         }
     }
 
-    /// Reloads the session for a given user ID.  If `uid` is nil, clears the current user.
     func reload(for uid: String?) async {
         isLoading = true
         defer { isLoading = false }
@@ -63,20 +56,25 @@ final class SessionStore: ObservableObject {
                 }
             }
             
-            // Ensure E2EE keys exist locally
+            // 1. Ensure local keys exist (Simulator or Device)
             try? CryptoService.shared.ensureKeysExist()
+            let localPublicKey = CryptoService.shared.getMyPublicKey()
             
-            // Fetch the user from Firestore
+            // 2. Fetch the user from Firestore
             var fetchedUser = try await UserService.shared.fetchUser(uid: uid)
             
-            // Backfill Public Key if missing on server (Migration for existing users)
-            if let user = fetchedUser, user.publicKey == nil, let myKey = CryptoService.shared.getMyPublicKey() {
-                try? await UserService.shared.updateUserPublicKey(uid: uid, key: myKey)
-                fetchedUser?.publicKey = myKey
+            // 3. CRITICAL FIX: Sync Key if Missing OR Different
+            // If the key on the server doesn't match the key on this device (e.g. after .v2 update),
+            // we must overwrite the server with the new key.
+            if let myKey = localPublicKey {
+                if fetchedUser?.publicKey != myKey {
+                    try? await UserService.shared.updateUserPublicKey(uid: uid, key: myKey)
+                    fetchedUser?.publicKey = myKey // Update local model immediately
+                    print("Security: Public Key updated on server to match device.")
+                }
             }
             
             currentUser = fetchedUser
-            // Save any pending FCM token once user is loaded
             PushNotificationManager.shared.savePendingToken(for: uid)
         } catch {
             #if DEBUG
@@ -86,16 +84,13 @@ final class SessionStore: ObservableObject {
         }
     }
 
-    /// Convenience getter for the current user's ID
     var id: String? { currentUser?.id }
 
-    /// Whether the user can request another verification email based on cooldown.
     var canResendVerificationEmail: Bool {
         guard let last = lastVerificationEmailSentAt else { return true }
         return Date().timeIntervalSince(last) >= 60
     }
 
-    /// Updates the current user's presence state if sharing is enabled.
     func setPresence(isOnline: Bool) async {
         guard var user = currentUser, let uid = user.id else { return }
         let effectiveStatus = user.shareOnlineStatus && isOnline

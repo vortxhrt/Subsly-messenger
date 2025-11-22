@@ -10,6 +10,7 @@ enum ChatServiceError: LocalizedError {
     case textTooLong
     case tooManyAttachments
     case attachmentValidationFailed
+    case encryptionFailed // New error
 
     var errorDescription: String? {
         switch self {
@@ -19,11 +20,12 @@ enum ChatServiceError: LocalizedError {
         case .textTooLong: return "Messages are limited to 4,000 characters."
         case .tooManyAttachments: return "You can attach up to 20 items per message."
         case .attachmentValidationFailed: return "One of the attachments could not be processed."
+        case .encryptionFailed: return "Encryption failed. The message was not sent."
         }
     }
 }
 
-// ListenerRegistration is main-actor isolated; keep this type main-actor too.
+// ListenerRegistration is main-actor isolated
 @MainActor
 final class DummyListener: NSObject, ListenerRegistration {
     static let shared = DummyListener()
@@ -35,7 +37,7 @@ actor ChatService {
     // MARK: - Singleton
     nonisolated static let shared = ChatService()
 
-    // MARK: - Debug helpers (nonisolated -> callable anywhere, no actor hop)
+    // MARK: - Debug helpers
     nonisolated static func dbg(_ items: Any..., fn: String = #function) {
         let ts = ISO8601DateFormatter().string(from: Date())
         let msg = items.map { String(describing: $0) }.joined(separator: " ")
@@ -83,7 +85,7 @@ actor ChatService {
         [a, b].sorted().joined(separator: "_")
     }
 
-    // MARK: - Attachment validation (actor-isolated)
+    // MARK: - Attachment validation
     private func validateAttachments(_ attachments: [PendingAttachment]) throws {
         guard attachments.count <= maxAttachmentCount else {
             throw ChatServiceError.tooManyAttachments
@@ -125,14 +127,11 @@ actor ChatService {
     // MARK: - Ensure thread
     func ensureThread(currentUID: String, otherUID: String) async throws -> ThreadModel {
         ChatService.enableFirebaseSDKDebugIfNeeded()
-        ChatService.dbg("ensureThread current=\(currentUID) other=\(otherUID)")
         let tid = threadId(for: currentUID, otherUID)
         guard let threadsCol = threadsCollection() else {
-            ChatService.dbg("Firestore not configured; returning local model only.")
             return ThreadModel(id: tid, members: [currentUID, otherUID], lastMessagePreview: nil, updatedAt: nil)
         }
         try await threadsCol.document(tid).setData(["members": [currentUID, otherUID]], merge: true)
-        ChatService.dbg("ensureThread upserted members for tid=\(tid)")
         return ThreadModel(id: tid, members: [currentUID, otherUID], lastMessagePreview: nil, updatedAt: nil)
     }
 
@@ -144,56 +143,39 @@ actor ChatService {
                      attachments: [PendingAttachment] = [],
                      reply: MessageModel.ReplyPreview? = nil) async throws {
 
-        ChatService.enableFirebaseSDKDebugIfNeeded()
         let authUid = Auth.auth().currentUser?.uid
-        ChatService.dbg("sendMessage tid=\(threadId) senderId=\(senderId) authUid=\(authUid ?? "nil") textLen=\(text.count) attachCount=\(attachments.count)")
         guard let authUid, authUid == senderId else {
-            ChatService.dbg("AUTH MISMATCH: senderId != auth.uid")
             throw ChatServiceError.notThreadMember
         }
 
-        guard let threadsCol = threadsCollection() else {
-            ChatService.dbg("Firestore not configured; abort send.")
-            return
-        }
+        guard let threadsCol = threadsCollection() else { return }
 
         try validateAttachments(attachments)
 
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty || !attachments.isEmpty else {
-            ChatService.dbg("Rejecting empty message.")
             throw ChatServiceError.emptyMessage
         }
         if trimmed.count > 4000 {
-            ChatService.dbg("Rejecting too long text len=\(trimmed.count)")
             throw ChatServiceError.textTooLong
         }
 
         let threadRef = threadsCol.document(threadId)
-        
-        // E2EE Setup: Find other user to get Public Key
         var otherPublicKey: String?
         
+        // Fetch other user's key
         do {
             let snap = try await threadRef.getDocument()
-            guard snap.exists else {
-                ChatService.dbg("Thread doc not found.")
-                throw ChatServiceError.threadUnavailable
-            }
+            guard snap.exists else { throw ChatServiceError.threadUnavailable }
             let members = snap.data()?["members"] as? [String] ?? []
-            ChatService.dbg("Thread members=", members)
-            guard members.contains(senderId) else {
-                ChatService.dbg("Sender not in thread members.")
-                throw ChatServiceError.notThreadMember
-            }
+            guard members.contains(senderId) else { throw ChatServiceError.notThreadMember }
             
-            // Find the other user
             if let otherId = members.first(where: { $0 != senderId }) {
                 let userDoc = try await Firestore.firestore().collection("users").document(otherId).getDocument()
                 otherPublicKey = userDoc.data()?["publicKey"] as? String
             }
         } catch {
-            ChatService.dbg("getDocument failed"); ChatService.dumpNSError(error)
+            ChatService.dumpNSError(error)
             throw ChatServiceError.threadUnavailable
         }
 
@@ -204,25 +186,24 @@ actor ChatService {
             "createdAt": FieldValue.serverTimestamp()
         ]
         
-        // E2EE: Encrypt text if we have the key
+        // AUDIT FIX 1: STRICT E2EE.
+        // If we have text but no key (or encryption fails), throw an error.
+        // Do NOT fallback to plaintext.
         if !trimmed.isEmpty {
-            if let key = otherPublicKey {
-                do {
-                    let encrypted = try CryptoService.shared.encrypt(text: trimmed, otherUserPublicKeyString: key)
-                    payload["text"] = encrypted
-                } catch {
-                    // Fallback or fail? For robust app, maybe fail. For now, send plaintext fallback so chat works if keys fail.
-                    print("E2EE Encrypt failed: \(error). Sending plain.")
-                    payload["text"] = trimmed
-                }
-            } else {
-                // User hasn't updated app yet? Send plain.
-                payload["text"] = trimmed
+            guard let key = otherPublicKey else {
+                ChatService.dbg("E2EE Error: Missing recipient public key")
+                throw ChatServiceError.encryptionFailed
+            }
+            do {
+                let encrypted = try CryptoService.shared.encrypt(text: trimmed, otherUserPublicKeyString: key)
+                payload["text"] = encrypted
+            } catch {
+                ChatService.dbg("E2EE Error: \(error)")
+                throw ChatServiceError.encryptionFailed
             }
         }
 
         let uploaded = try await AttachmentService.shared.upload(attachments, threadId: threadId)
-        ChatService.dbg("uploaded attachments count=", uploaded.count)
 
         if let first = uploaded.first {
             payload["mediaType"] = first.kind.rawValue
@@ -245,99 +226,50 @@ actor ChatService {
                 return d
             }
         }
+        
         if let r = reply {
             payload["replyToMessageId"] = r.messageId
             if let s = r.senderId { payload["replyToSenderId"] = s }
             if let n = r.senderName { payload["replyToSenderName"] = n }
-            
-            // NOTE: Reply text is currently stored plain in this model for preview.
-            // E2EE usually requires hiding this too, but keeping it simple for now as per requirements.
-            if let tx = r.text { payload["replyToText"] = tx }
+            // AUDIT FIX 2: Do NOT store replyToText.
+            // Storing it in plaintext leaks data. Storing it encrypted is complex.
+            // We will drop it and let client resolve it from ID.
             if let mk = r.mediaKind { payload["replyToMediaType"] = mk.rawValue }
         }
 
-        do {
-            try await msgRef.setData(payload, merge: true)
-            ChatService.dbg("Message written id=\(msgRef.documentID)")
-        } catch {
-            ChatService.dbg("setData failed"); ChatService.dumpNSError(error)
-            throw error
-        }
+        try await msgRef.setData(payload, merge: true)
 
-        // Update Thread Preview
-        // Note: We store a generic message for preview if E2EE is on, or raw text if plain
+        // Preview logic: If encrypted, hide text.
         let preview: String = {
             if !trimmed.isEmpty {
-                return otherPublicKey != nil ? "Message" : trimmed
+                return "Message" // Generic preview for privacy
             }
             if uploaded.isEmpty { return "" }
             if uploaded.count == 1, let f = uploaded.first { return f.previewText }
-            let counts = uploaded.reduce(into: [MessageModel.Media.Kind: Int]()) { $0[$1.kind, default: 0] += 1 }
-            return counts
-                .sorted { $0.key.rawValue < $1.key.rawValue }
-                .map { kind, c in
-                    switch kind {
-                    case .image:
-                        return c > 1 ? "\(c) Photos" : "Photo"
-                    case .video:
-                        return c > 1 ? "\(c) Videos" : "Video"
-                    case .audio:
-                        return c > 1 ? "\(c) Voice messages" : "Voice message"
-                    }
-                }
-                .joined(separator: ", ")
+            return "\(uploaded.count) Attachments"
         }()
 
-        do {
-            try await threadRef.updateData([
-                "lastMessagePreview": preview,
-                "updatedAt": FieldValue.serverTimestamp()
-            ])
-            ChatService.dbg("Thread updated preview + timestamp")
-        } catch {
-            ChatService.dbg("threadRef.updateData failed"); ChatService.dumpNSError(error)
-            throw error
-        }
+        try await threadRef.updateData([
+            "lastMessagePreview": preview,
+            "updatedAt": FieldValue.serverTimestamp()
+        ])
     }
 
-    // MARK: - Listeners with deep debug
+    // MARK: - Listeners
     @MainActor
     func listenThreads(for uidHint: String,
                        onChange: @escaping ([ThreadModel]) -> Void) -> ListenerRegistration {
-        ChatService.enableFirebaseSDKDebugIfNeeded()
-
-        guard FirebaseApp.app() != nil else {
-            ChatService.dbg("No FirebaseApp; abort listen.")
+        guard FirebaseApp.app() != nil, let uid = Auth.auth().currentUser?.uid else {
             onChange([]); return DummyListener.shared
         }
-        let authUid = Auth.auth().currentUser?.uid
-        ChatService.dbg("listenThreads uidHint=\(uidHint) authUid=\(authUid ?? "nil")")
-
-        guard let authUid else {
-            ChatService.dbg("No Auth user present at listen time.")
-            onChange([]); return DummyListener.shared
-        }
-        if authUid != uidHint {
-            ChatService.dbg("UID mismatch: using authUid=\(authUid) (hint=\(uidHint))")
-        }
-        let uid = authUid
 
         let threadsCol = Firestore.firestore().collection("threads")
         let query = threadsCol.whereField("members", arrayContains: uid)
                               .order(by: "updatedAt", descending: true)
-        ChatService.dbg("Query: threads WHERE members ARRAY_CONTAINS \(uid) ORDER BY updatedAt DESC")
 
-        // Live listener
         return query.addSnapshotListener { snap, err in
-            if let err = err {
-                ChatService.dbg("LIVE LISTEN FAILED"); ChatService.dumpNSError(err)
-                onChange([]); return
-            }
-            guard let snap else {
-                ChatService.dbg("LIVE LISTEN: nil snapshot, no error"); onChange([]); return
-            }
+            guard let snap else { onChange([]); return }
             let models = snap.documents.map { Self.mapToThread(id: $0.documentID, map: $0.data()) }
-            ChatService.dbg("LIVE LISTEN OK, docs=\(models.count)")
             onChange(models)
         }
     }
@@ -346,11 +278,7 @@ actor ChatService {
     func listenMessages(threadId: String,
                         limit: Int = 100,
                         onChange: @escaping ([MessageModel]) -> Void) -> ListenerRegistration {
-        ChatService.enableFirebaseSDKDebugIfNeeded()
-        ChatService.dbg("listenMessages tid=\(threadId) limit=\(limit)")
-
         guard FirebaseApp.app() != nil else {
-            ChatService.dbg("No FirebaseApp; abort messages listen.")
             onChange([]); return DummyListener.shared
         }
 
@@ -360,23 +288,8 @@ actor ChatService {
             .order(by: "createdAt", descending: false)
             .limit(toLast: limit)
 
-        // Probe
-        q.limit(to: 1).getDocuments { snap, err in
-            if let err = err {
-                ChatService.dbg("PROBE messages one-shot failed"); ChatService.dumpNSError(err)
-            } else {
-                ChatService.dbg("PROBE messages one-shot OK count=\(snap?.documents.count ?? 0)")
-            }
-        }
-
         return q.addSnapshotListener { snap, err in
-            if let err = err {
-                ChatService.dbg("LIVE messages listen failed"); ChatService.dumpNSError(err)
-                onChange([]); return
-            }
-            guard let snap else {
-                ChatService.dbg("LIVE messages: nil snapshot"); onChange([]); return
-            }
+            guard let snap else { onChange([]); return }
             let models: [MessageModel] = snap.documents.map { doc in
                 let data = doc.data()
                 return MessageModel(
@@ -391,34 +304,11 @@ actor ChatService {
                     replyTo: ChatService.mapReply(from: data)
                 )
             }
-            ChatService.dbg("LIVE messages OK count=\(models.count)")
             onChange(models)
         }
     }
 
-    // MARK: - Presence probe (optional helper for debugging a specific doc)
-    @MainActor
-    func debugProbePresence(threadId: String, userId: String) {
-        ChatService.dbg("debugProbePresence tid=\(threadId) uid=\(userId)")
-        guard FirebaseApp.app() != nil else {
-            ChatService.dbg("No FirebaseApp; abort presence probe.")
-            return
-        }
-        let ref = Firestore.firestore()
-            .collection("threads").document(threadId)
-            .collection("presence").document(userId)
-
-        ref.getDocument { snap, err in
-            if let err = err {
-                ChatService.dbg("PRESENCE PROBE FAILED"); ChatService.dumpNSError(err)
-            } else {
-                let exists = snap?.exists ?? false
-                ChatService.dbg("PRESENCE PROBE OK exists=\(exists) data=\(snap?.data() ?? [:])")
-            }
-        }
-    }
-
-    // MARK: - Mapping
+    // MARK: - Mappers
     nonisolated private static func mapToThread(id: String, map: [String: Any]) -> ThreadModel {
         let members = map["members"] as? [String] ?? []
         let last = map["lastMessagePreview"] as? String
@@ -438,20 +328,13 @@ actor ChatService {
     nonisolated private static func mapLegacyMedia(from data: [String: Any]) -> MessageModel.Media? {
         guard let typeRaw = data["mediaType"] as? String,
               let kind = MessageModel.Media.Kind(rawValue: typeRaw) else { return nil }
-
-        func number(_ v: Any?) -> Double? {
-            if let d = v as? Double { return d }
-            if let i = v as? Int { return Double(i) }
-            if let n = v as? NSNumber { return n.doubleValue }
-            return nil
-        }
         return MessageModel.Media(
             kind: kind,
             url: data["mediaURL"] as? String,
             thumbnailURL: data["thumbnailURL"] as? String,
-            width: number(data["mediaWidth"]),
-            height: number(data["mediaHeight"]),
-            duration: number(data["mediaDuration"]),
+            width: data["mediaWidth"] as? Double,
+            height: data["mediaHeight"] as? Double,
+            duration: data["mediaDuration"] as? Double,
             localData: nil,
             localThumbnailData: nil,
             localFilePath: nil
@@ -461,20 +344,13 @@ actor ChatService {
     nonisolated private static func mapAttachmentDict(_ dict: [String: Any]) -> MessageModel.Media? {
         guard let typeRaw = dict["type"] as? String,
               let kind = MessageModel.Media.Kind(rawValue: typeRaw) else { return nil }
-
-        func number(_ v: Any?) -> Double? {
-            if let d = v as? Double { return d }
-            if let i = v as? Int { return Double(i) }
-            if let n = v as? NSNumber { return n.doubleValue }
-            return nil
-        }
         return MessageModel.Media(
             kind: kind,
             url: dict["url"] as? String,
             thumbnailURL: dict["thumbnailURL"] as? String,
-            width: number(dict["width"]),
-            height: number(dict["height"]),
-            duration: number(dict["duration"]),
+            width: dict["width"] as? Double,
+            height: dict["height"] as? Double,
+            duration: dict["duration"] as? Double,
             localData: nil,
             localThumbnailData: nil,
             localFilePath: nil
@@ -489,7 +365,7 @@ actor ChatService {
             messageId: messageId,
             senderId: data["replyToSenderId"] as? String,
             senderName: data["replyToSenderName"] as? String,
-            text: data["replyToText"] as? String,
+            text: data["replyToText"] as? String, // Will be nil now in DB
             mediaKind: mediaKind
         )
     }
